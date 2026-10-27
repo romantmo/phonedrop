@@ -1,0 +1,35 @@
+# CI — «непрерывная проверка».
+# Каждый раз, когда код попадает на GitHub, робот GitHub берёт чистый компьютер с Linux,
+# скачивает проект, ставит зависимости и запускает автотесты.
+# Если хоть один тест упал — проверка красная, и ты сразу видишь, что сломалось.
+
+name: CI
+
+on:
+  push:
+    branches: [main]   # каждый push в основную ветку
+  pull_request:        # и каждый Pull Request (о них — позже)
+
+permissions:
+  contents: read       # роботу нужно только читать код
+
+jobs:
+  test:
+    name: Автотесты
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Скачать код проекта
+        uses: actions/checkout@v7
+
+      - name: Установить Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip   # запомнить скачанные библиотеки — следующий запуск быстрее
+
+      - name: Установить зависимости
+        run: pip install -r requirements-dev.txt
+
+      - name: Запустить тесты
+        run: pytest -v
