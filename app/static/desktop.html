@@ -11,12 +11,17 @@
 <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/icons/favicon-64.png" sizes="64x64">
 <link rel="stylesheet" href="/static/chat.css">
+<link rel="stylesheet" href="/static/tools.css">
 <link rel="stylesheet" href="/static/desktop.css">
 </head>
-<body>
+<body data-role="pc">
 <div class="app">
   <aside class="side">
     <div class="brand"><img src="/static/icons/icon-192.png" alt="">PhoneDrop</div>
+    <nav class="tabs" id="tabs" role="tablist" hidden>
+      <button type="button" role="tab" id="tabChat" class="on" aria-selected="true">💬 Чат</button>
+      <button type="button" role="tab" id="tabTools" aria-selected="false">🛠 Инструменты</button>
+    </nav>
 
     <section class="card pair" id="pairBox" hidden>
       <div class="qr" id="qr"></div>
@@ -101,7 +106,87 @@
 
     <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить на телефон</div>
   </main>
+
+  <!-- ===== Инструменты: сканер и конвертеры ===== -->
+  <main class="tools-main" id="toolsMain" hidden>
+    <header class="chat-head">
+      <button class="icon-btn" id="toolBack" type="button" aria-label="Ко всем инструментам" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <div class="avatar tool-ico" id="toolIcon">🛠</div>
+      <div class="who">
+        <div class="name" id="toolTitle">Инструменты</div>
+        <div class="status" id="toolSub">Сканер и конвертеры. Готовый файл можно скачать или отправить на телефон</div>
+      </div>
+    </header>
+    <div class="tools-home" id="toolsHome"></div>
+    <section class="tool-view" id="toolView" hidden>
+    <div class="tool-body" id="toolBody">
+      <p class="tool-hint" id="toolHint"></p>
+      <div class="tool-files" id="toolFiles"></div>
+      <div class="tool-add" id="toolAdd">
+        <button class="btn" id="toolCamera" type="button">📷 Снять страницу</button>
+        <button class="btn" id="toolPick" type="button">🖼 Выбрать файлы</button>
+      </div>
+      <input type="file" id="toolCameraInput" accept="image/*" capture="environment" hidden>
+      <input type="file" id="toolPickInput" hidden>
+      <div class="seg" id="toolOptions" hidden></div>
+      <div class="scan-settings" id="scanSettings" hidden></div>
+      <div class="tool-results" id="toolResults" hidden>
+        <h3>Готово ✅</h3>
+        <div class="tool-results-list" id="toolResultsList"></div>
+        <div class="tool-results-actions">
+          <button class="btn primary" id="toolShareAll" type="button">📤 Поделиться</button>
+          <button class="btn" id="toolSendPc" type="button">💻 На компьютер</button>
+        </div>
+        <p class="tool-note" id="toolNote"></p>
+      </div>
+    </div>
+    <footer class="tool-foot">
+      <div class="progress" id="toolProgress" hidden><div></div></div>
+      <button class="btn primary block" id="toolRun" type="button" disabled>Сделать PDF</button>
+    </footer>
+    </section>
+    <div class="drop-overlay" id="toolDrop" hidden>Отпусти, чтобы добавить файлы</div>
+  </main>
 </div>
+<!-- ===== Редактор страниц сканера: обрезка и вид (большое превью) ===== -->
+<div class="scan-editor" id="scanEditor" hidden>
+  <header class="chat-head">
+    <button class="icon-btn" id="edBack" type="button" aria-label="Готово">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+    </button>
+    <div class="ed-nav">
+      <button class="icon-btn" id="edPrev" type="button" aria-label="Предыдущая страница">‹</button>
+      <div class="name" id="edTitle">1 / 1</div>
+      <button class="icon-btn" id="edNext" type="button" aria-label="Следующая страница">›</button>
+    </div>
+    <button class="btn primary ed-done" id="edDone" type="button">Готово</button>
+  </header>
+  <div class="ed-tabs seg">
+    <button type="button" id="edTabCrop">✂️ Обрезка</button>
+    <button type="button" id="edTabLook">🎨 Вид</button>
+  </div>
+  <div class="ed-stage" id="edStage">
+    <div class="crop-box" id="cropBox">
+      <img id="edImg" alt="">
+      <svg class="crop-svg" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+        <path id="cropShade" fill-rule="evenodd"/>
+        <polygon id="cropPoly"/>
+      </svg>
+    </div>
+    <img class="ed-result" id="edResult" alt="Так страница будет выглядеть в PDF" hidden>
+    <span class="ed-spin" id="edLoading" hidden></span>
+    <span class="ed-badge" id="edBadge" hidden>Удерживай — покажу «до»</span>
+  </div>
+  <footer class="ed-tools" id="edCropTools">
+    <button class="btn" id="edAuto" type="button">✨ Авто</button>
+    <button class="btn" id="edFull" type="button">Весь кадр</button>
+    <button class="btn" id="edRotate" type="button">⟳ Поворот</button>
+  </footer>
+  <footer class="ed-look" id="edLookTools" hidden></footer>
+</div>
+
 <div class="modal" id="relinkModal" hidden>
   <div class="modal-card pair">
     <h2>📱 Переподключить телефон</h2>
@@ -113,6 +198,8 @@
   </div>
 </div>
 <script src="/static/chat.js"></script>
+<script src="/static/scanner.js"></script>
+<script src="/static/tools.js"></script>
 <script src="/static/desktop.js"></script>
 </body>
 </html>

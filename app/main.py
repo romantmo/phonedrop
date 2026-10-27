@@ -93,7 +93,7 @@ OFFICE_EXTS = {
 }
 HEIC_EXTS = {"heic", "heif"}
 IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "avif"} | HEIC_EXTS
-TOOL_OPS = ("office-pdf", "images-pdf", "merge-pdf", "pdf-images", "images-jpg")
+TOOL_OPS = ("office-pdf", "images-pdf", "merge-pdf", "pdf-images", "images-jpg", "compress-pdf")
 
 
 def file_ext(name: str | None) -> str:
@@ -1057,6 +1057,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return [(name if name.lower().endswith(".pdf") else f"{name}.pdf", "application/pdf")]
         if op == "merge-pdf":
             return [(f"{first} (объединённый).pdf", "application/pdf")]
+        if op == "compress-pdf":
+            return [(f"{first} (сжатый).pdf", "application/pdf")]
         if op == "pdf-images":
             return [(f"{first} — стр. {i + 1}.jpg", "image/jpeg") for i in range(count)]
         return [(f"{stem(inputs[i][1]) if i < len(inputs) else first}.jpg", "image/jpeg") for i in range(count)]
@@ -1073,7 +1075,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif op == "merge-pdf":
             if len(inputs) < 2 or not all(is_pdf(name, mime) for _, name, mime in inputs):
                 raise HTTPException(400, "Выбери хотя бы два PDF")
-        elif op == "pdf-images":
+        elif op in ("pdf-images", "compress-pdf"):
             if len(inputs) != 1 or not is_pdf(inputs[0][1], inputs[0][2]):
                 raise HTTPException(400, "Выбери один PDF")
 

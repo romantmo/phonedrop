@@ -70,6 +70,10 @@ def _run(op: str, inputs: list[tuple[Path, str]], form: dict, out_dir: Path) -> 
         except ValueError:
             pages = []
         return ops.scan_to_pdf(paths, out_dir, pages, form.get("page_size", "auto"), form.get("weight", "normal"))
+    if op == "compress-pdf":
+        if len(inputs) != 1:
+            raise ops.ConvertError("Нужен ровно один PDF")
+        return ops.compress_pdf(paths[0], out_dir, form.get("preset", "normal"))
     if op == "merge-pdf":
         return ops.merge_pdfs(paths, out_dir)
     if op == "pdf-images":

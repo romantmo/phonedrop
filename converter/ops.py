@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import signal
@@ -232,6 +233,57 @@ def merge_pdfs(paths: list[Path], out_dir: Path) -> list[Path]:
     out = out_dir / "result.pdf"
     with out.open("wb") as f:
         writer.write(f)
+    return [out]
+
+
+# ------------------------------------------------------------------ сжать PDF
+
+# Самая длинная сторона картинки внутри PDF и качество JPEG.
+PDF_PRESETS = {
+    "light": (1240, 45),   # маленький: ~150 dpi для листа A4
+    "normal": (1754, 65),  # средний: ~210 dpi
+    "max": (2480, 80),     # высокое качество: 300 dpi
+}
+
+
+def compress_pdf(path: Path, out_dir: Path, preset: str = "normal") -> list[Path]:
+    """Уменьшает PDF: пережимает картинки внутри (сканы, фото). Текст остаётся текстом —
+    его можно выделять и искать. Если меньше не получилось — возвращаем исходный файл."""
+    max_side, quality = PDF_PRESETS.get(preset, PDF_PRESETS["normal"])
+    reader = _read_pdf(path)
+    if len(reader.pages) > MAX_TOTAL_PAGES:
+        raise ConvertError(f"Слишком много страниц (максимум {MAX_TOTAL_PAGES})")
+    writer = PdfWriter(clone_from=reader)
+    for page in writer.pages:
+        try:
+            images = list(page.images)
+        except Exception:
+            images = []
+        for img in images:
+            try:
+                xobj = img.indirect_reference.get_object() if img.indirect_reference else {}
+                # Прозрачность, маски и чёрно-белые (факс) картинки не трогаем — они и так лёгкие
+                # или после пережатия испортятся.
+                if any(k in xobj for k in ("/SMask", "/Mask", "/ImageMask")):
+                    continue
+                pil = img.image
+                if pil.mode not in ("RGB", "L") or pil.width * pil.height > Image.MAX_IMAGE_PIXELS:
+                    continue
+                before = len(img.data)
+                small = _fit(pil, max_side)
+                buf = io.BytesIO()
+                small.save(buf, "JPEG", quality=quality, optimize=True)
+                if buf.tell() < before * 0.9:  # меняем, только если стало заметно легче
+                    img.replace(small, quality=quality)
+            except Exception:
+                continue  # необычный формат картинки — оставляем как есть
+        page.compress_content_streams()
+    writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
+    out = out_dir / "result.pdf"
+    with out.open("wb") as f:
+        writer.write(f)
+    if out.stat().st_size >= path.stat().st_size:
+        shutil.copyfile(path, out)  # исходный уже оптимален
     return [out]
 
 

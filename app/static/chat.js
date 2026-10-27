@@ -375,7 +375,7 @@ window.PD = (() => {
       // Ctrl+V скриншота или файла — сразу отправка.
       document.addEventListener("paste", (e) => {
         const files = [...(e.clipboardData?.files || [])];
-        if (!files.length) return;
+        if (!files.length || (zone && zone.hidden)) return;  // открыт не чат (например, «Инструменты»)
         e.preventDefault();
         this.sendFiles(files);
       });

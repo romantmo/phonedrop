@@ -936,3 +936,27 @@ def test_phone_reattaches_computer_that_lost_login(client, pc, phone):
     pair(Device(client, "pc"), stranger)
     assert stranger.post(f"/api/chats/{chat_id}/reattach", json={"code": code}).status_code == 404
     assert phone.post(f"/api/chats/{chat_id}/reattach", json={"code": code}).status_code == 410
+
+
+def test_compress_pdf_tool_on_phone_and_pc(pc, phone, tmp_path):
+    from test_converter import heavy_pdf
+
+    pair(pc, phone)
+    data = heavy_pdf(tmp_path / "mail.pdf").read_bytes()
+    for dev in (phone, pc):  # инструменты работают и на телефоне, и на компьютере
+        r = dev.post("/api/tools/compress-pdf", data={"preset": "light"},
+                     files={"files": ("Счёт из почты.pdf", data, "application/pdf")})
+        assert r.status_code == 200, r.text
+        (res,) = r.json()["results"]
+        assert res["name"] == "Счёт из почты (сжатый).pdf" and res["size"] < len(data) / 3
+    # с компьютера результат можно отправить на телефон
+    r = pc.post("/api/tools/send", json={"ids": [res["id"]]})
+    assert r.status_code == 200
+    assert phone.get(f"/api/chats/{r.json()['chat_id']}").json()["messages"][-1]["name"] == res["name"]
+
+
+def test_tools_on_unlinked_pc_are_closed(client):
+    lonely = Device(client, "pc")
+    open_pc(lonely)  # QR показан, телефон не подключён
+    r = lonely.post("/api/tools/images-jpg", files={"files": ("a.jpg", jpeg(), "image/jpeg")})
+    assert r.status_code == 401

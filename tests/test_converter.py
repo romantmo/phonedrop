@@ -221,3 +221,43 @@ def test_scan_http(tmp_path):
                     files={"files": ("p.jpg", photo, "image/jpeg")})
     assert r.headers["content-type"] == "image/jpeg"
     assert max(Image.open(io.BytesIO(r.content)).size) == 400
+
+
+# ------------------------------------------------------------------ сжать PDF
+
+def heavy_pdf(path: Path) -> Path:
+    """PDF со «сканом»: большая фотография с шумом, сохранённая почти без сжатия."""
+    rng = np.random.default_rng(1)
+    noise = rng.integers(0, 60, (2400, 1800, 3), dtype=np.uint8)
+    img = Image.fromarray(np.clip(noise + 180, 0, 255).astype(np.uint8))
+    img.save(path, "PDF", resolution=200, quality=95)
+    return path
+
+
+def test_compress_pdf_presets(tmp_path):
+    src = heavy_pdf(tmp_path / "scan.pdf")
+    sizes = {}
+    for preset in ("light", "normal", "max"):
+        d = tmp_path / preset
+        d.mkdir()
+        (out,) = ops.compress_pdf(src, d, preset)
+        sizes[preset] = out.stat().st_size
+        assert len(PdfReader(out).pages) == 1
+    assert sizes["light"] < sizes["normal"] <= sizes["max"] <= src.stat().st_size
+    assert sizes["light"] < src.stat().st_size / 3
+
+
+def test_compress_pdf_never_makes_file_bigger(tmp_path):
+    src = make_pdf(tmp_path / "text.pdf", 3)  # без картинок — сжимать почти нечего
+    (out,) = ops.compress_pdf(src, tmp_path, "light")
+    assert out.stat().st_size <= src.stat().st_size
+    assert len(PdfReader(out).pages) == 3
+
+
+def test_compress_pdf_http(tmp_path):
+    client = TestClient(app)
+    data = heavy_pdf(tmp_path / "scan.pdf").read_bytes()
+    r = client.post("/convert/compress-pdf", data={"preset": "light"},
+                    files={"files": ("scan.pdf", data, "application/pdf")})
+    (pdf,) = unzip(r.content)
+    assert pdf.startswith(b"%PDF") and len(pdf) < len(data) / 3

@@ -1,11 +1,12 @@
-// PhoneDrop — «Инструменты» на телефоне: сканер документов и конвертеры.
+// PhoneDrop — «Инструменты» (телефон и компьютер): сканер документов и конвертеры.
 // Файлы отправляются на наш сервер, там их обрабатывает отдельный изолированный конвертер,
 // результат хранится 30 минут — успеть поделиться, скачать или отправить на компьютер.
 "use strict";
 
 window.PDTools = (() => {
   const { $, el, toast, api, fmtSize, canShareFiles, shareFiles, prefetchShare } = PD;
-  const ROLE = "phone";
+  const ROLE = document.body.dataset.role || "phone";  // «pc» — на компьютере
+  const ON_PC = ROLE === "pc";
   const MAX_FILES = 50;
   const OFFICE_ACCEPT = ".doc,.docx,.docm,.odt,.rtf,.xls,.xlsx,.xlsm,.ods,.csv,.ppt,.pptx,.pps,.ppsx,.odp";
   const IMAGE_ACCEPT = "image/*,.heic,.heif";
@@ -23,6 +24,13 @@ window.PDTools = (() => {
       sub: "Word, Excel, PowerPoint",
       hint: "Выбери файл Word, Excel или PowerPoint — получишь PDF, который откроется на любом устройстве.",
       accept: OFFICE_ACCEPT, multi: false, min: 1, action: "Превратить в PDF",
+    },
+    {
+      id: "compresspdf", op: "compress-pdf", icon: "🪶", title: "Сжать PDF",
+      sub: "Тяжёлый PDF → лёгкий",
+      hint: "Например, скан из почты на 20 МБ. Картинки внутри пережимаются, текст остаётся текстом — его можно выделять и искать.",
+      accept: "application/pdf,.pdf", multi: false, min: 1, action: "Сжать PDF",
+      options: { key: "preset", def: "normal", choices: [["light", "Маленький"], ["normal", "Средний"], ["max", "Высокое качество"]] },
     },
     {
       id: "merge", op: "merge-pdf", icon: "📎", title: "Объединить PDF",
@@ -86,9 +94,10 @@ window.PDTools = (() => {
     $("toolIcon").textContent = tool.icon;
     $("toolTitle").textContent = tool.title;
     $("toolSub").textContent = tool.sub;
-    $("toolHint").textContent = tool.hint;
-    $("toolCamera").hidden = !tool.camera;
-    $("toolPick").textContent = tool.camera ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
+    $("toolHint").textContent = tool.hint + (ON_PC ? " Файлы можно перетащить мышкой в это окно или вставить Ctrl+V." : "");
+    $("toolCamera").hidden = !tool.camera || ON_PC;
+    $("toolPick").textContent = tool.camera && !ON_PC ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
+    $("toolSendPc").textContent = ON_PC ? "📱 На телефон" : "💻 На компьютер";
     const pick = $("toolPickInput");
     pick.accept = tool.accept;
     pick.multiple = tool.multi;
@@ -119,9 +128,13 @@ window.PDTools = (() => {
   function addFiles(list) {
     let files = [...list];
     if (!files.length) return;
-    if (tool.accept === IMAGE_ACCEPT && files.some((f) => !isImage(f))) {
-      toast("Здесь можно использовать только фото", true);
-      files = files.filter(isImage);
+    // Перетащили или вставили не тот тип файла — отсеиваем сразу, без похода на сервер.
+    const ok = (f) => tool.accept.split(",").some((a) => a.startsWith(".")
+      ? f.name.toLowerCase().endsWith(a) : a.endsWith("/*") ? f.type.startsWith(a.slice(0, -1)) : f.type === a);
+    if (files.some((f) => !ok(f))) {
+      toast(tool.accept === IMAGE_ACCEPT ? "Здесь можно использовать только фото" : "Этот тип файла здесь не подходит", true);
+      files = files.filter(ok);
+      if (!files.length) return;
     }
     if (tool.scanner) return uploadScan(files);
     if (!tool.multi) {
@@ -348,7 +361,15 @@ window.PDTools = (() => {
           el("a", { href: r.download_url, download: r.name }, "Скачать")))));
     $("toolShareAll").hidden = !canShareFiles;
     $("toolShareAll").textContent = results.length > 1 ? `📤 Поделиться (${results.length})` : "📤 Поделиться";
-    $("toolNote").textContent = `Файлы хранятся на сервере ${ttl} минут, потом удаляются.`;
+    let note = `Файлы хранятся на сервере ${ttl} минут, потом удаляются.`;
+    if (tool.op === "compress-pdf" && items[0] && results[0]) {
+      const before = items[0].file.size;
+      const after = results[0].size;
+      note = (after < before
+        ? `Было ${fmtSize(before)} → стало ${fmtSize(after)} (−${Math.round((1 - after / before) * 100)}%). `
+        : "Меньше не получилось — этот PDF уже сжат. ") + note;
+    }
+    $("toolNote").textContent = note;
     $("toolResults").hidden = false;
     requestAnimationFrame(() => $("toolResults").scrollIntoView({ behavior: "smooth", block: "start" }));
   }
@@ -368,6 +389,18 @@ window.PDTools = (() => {
   }
 
   async function sendToPc() {
+    if (ON_PC) {  // с компьютера — в его чат с телефоном
+      try {
+        await api(ROLE, "/api/tools/send", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: results.map((r) => r.id) }),
+        });
+        toast("Отправлено на телефон");
+      } catch (e) {
+        toast(e.message, true);
+      }
+      return;
+    }
     let chats;
     try {
       chats = (await api(ROLE, "/api/phone/chats")).chats;
@@ -395,6 +428,33 @@ window.PDTools = (() => {
     $(id).addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
   }
   $("toolRun").addEventListener("click", run);
+
+  // Компьютер: файлы можно перетащить мышкой в окно инструмента или вставить Ctrl+V.
+  const view = $("toolView");
+  const drop = $("toolDrop");
+  if (drop) {
+    let depth = 0;
+    view.parentElement.addEventListener("dragenter", (e) => {
+      if (view.hidden || !tool || ![...e.dataTransfer.types].includes("Files")) return;
+      depth++;
+      drop.hidden = false;
+    });
+    view.parentElement.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; drop.hidden = true; } });
+    view.parentElement.addEventListener("dragover", (e) => { if (!view.hidden) e.preventDefault(); });
+    view.parentElement.addEventListener("drop", (e) => {
+      if (view.hidden) return;
+      e.preventDefault();
+      depth = 0;
+      drop.hidden = true;
+      addFiles(e.dataTransfer.files);
+    });
+  }
+  document.addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (!files.length || view.hidden || view.offsetParent === null || !tool) return;
+    e.preventDefault();
+    addFiles(files);
+  });
   $("toolShareAll").addEventListener("click", () => shareFiles(results));
   $("toolSendPc").addEventListener("click", sendToPc);
 

@@ -5,7 +5,7 @@
 
 window.PDScanner = (() => {
   const { $, el, toast, api } = PD;
-  const ROLE = "phone";
+  const ROLE = document.body.dataset.role || "phone";  // «pc» — на компьютере
   const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
   const MODES = [["color", "Цвет"], ["doc", "Документ"], ["bw", "Ч/Б"], ["original", "Оригинал"]];

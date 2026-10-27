@@ -26,6 +26,8 @@
     $("composer").hidden = !linked;
     $("logoutBtn").hidden = !linked;
     $("relinkBtn").hidden = !(linked && remember);
+    $("tabs").hidden = !linked;  // инструменты — только для подключённого к телефону компьютера
+    if (!linked) showSection("chat");
     if (document.activeElement !== $("deviceName")) {
       $("deviceName").value = state.device.label;
       $("saveNameBtn").hidden = true;
@@ -200,6 +202,37 @@
     }
     renderPush();
   });
+
+  // ---------- вкладки «Чат | Инструменты»
+  let section = "chat";
+  function showSection(name) {
+    section = name;
+    $("dropZone").hidden = name !== "chat";
+    $("toolsMain").hidden = name !== "tools";
+    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"]]) {
+      $(id).classList.toggle("on", section === value);
+      $(id).setAttribute("aria-selected", String(section === value));
+    }
+    if (name === "tools" && $("toolView").hidden) showToolsHome();
+  }
+  function showToolsHome() {
+    $("toolView").hidden = true;
+    $("toolsHome").hidden = false;
+    $("toolBack").hidden = true;
+    $("toolIcon").textContent = "🛠";
+    $("toolTitle").textContent = "Инструменты";
+    $("toolSub").textContent = "Сканер и конвертеры. Готовый файл можно скачать или отправить на телефон";
+    PDTools.renderHome($("toolsHome"), openTool);
+  }
+  function openTool(id) {
+    if (!PDTools.open(id)) return;
+    $("toolsHome").hidden = true;
+    $("toolView").hidden = false;
+    $("toolBack").hidden = false;
+  }
+  $("tabChat").addEventListener("click", () => showSection("chat"));
+  $("tabTools").addEventListener("click", () => showSection("tools"));
+  $("toolBack").addEventListener("click", showToolsHome);
 
   // ---------- «Переподключить телефон» (телефон переустановили или сменили)
   let relinkTimer = null;
