@@ -8,7 +8,8 @@
 
 services:
   app:
-    image: ghcr.io/romantmo/phonedrop:latest
+    # Версию (номер коммита) подставляет deploy.sh. Вручную без неё — последняя версия.
+    image: ghcr.io/romantmo/phonedrop:${APP_TAG:-latest}
     restart: unless-stopped              # упало или сервер перезагрузился — запустить снова
     environment:
       PUBLIC_URL: https://drop.rbgen.com # адрес сайта для QR-кода

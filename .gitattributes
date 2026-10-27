@@ -1,0 +1,5 @@
+# Скрипты для Linux всегда хранить с переносами строк Linux (LF), даже если правишь их в Windows.
+*.sh text eol=lf
+Caddyfile text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
