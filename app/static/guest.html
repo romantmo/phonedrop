@@ -8,7 +8,7 @@
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
-<title>PhoneDrop — получить файлы</title>
+<title>PhoneDrop — обмен файлами по коду</title>
 <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/icons/favicon-64.png" sizes="64x64">
 <link rel="stylesheet" href="/static/chat.css">
@@ -19,15 +19,15 @@
   <img class="logo" src="/static/icons/icon-192.png" alt="">
   <div class="who">
     <div class="name">PhoneDrop</div>
-    <div class="status">получить файлы</div>
+    <div class="status">обмен файлами по коду</div>
   </div>
 </header>
 
 <main class="g-main">
   <!-- Ввод кода -->
   <section class="g-card" id="codeCard" hidden>
-    <h1>📥 Тебе прислали файлы?</h1>
-    <p>Введи код из 9 цифр, который тебе продиктовали или прислали.</p>
+    <h1>🔑 Введи код</h1>
+    <p>Код из 9 цифр, который тебе продиктовали или прислали: по нему можно получить файлы или отправить их.</p>
     <form id="codeForm" autocomplete="off">
       <input id="codeInput" inputmode="numeric" maxlength="11" placeholder="123 456 789" aria-label="Код" autofocus>
       <button class="btn primary block" type="submit">Открыть</button>
@@ -52,6 +52,19 @@
     <p class="g-note" id="filesNote"></p>
   </section>
 
+  <!-- «Отправь файлы для …» (запрос файлов) -->
+  <section class="g-card" id="uploadCard" hidden>
+    <h1 id="upTitle">📤 Отправь файлы</h1>
+    <p class="g-meta" id="upMeta"></p>
+    <div class="g-drop" id="upDrop">
+      <span>Перетащи файлы сюда</span>
+      <button class="btn primary" id="upPick" type="button">📂 Выбрать файлы</button>
+      <input type="file" id="upInput" multiple hidden>
+    </div>
+    <div class="g-list" id="upList"></div>
+    <p class="g-note">Связь оборвалась — загрузка продолжится сама. Не закрывай страницу, пока всё не загрузится.</p>
+  </section>
+
   <!-- Ошибка -->
   <section class="g-card" id="errorCard" hidden>
     <h1>😕 Не нашлось</h1>
@@ -63,6 +76,7 @@
 </main>
 
 <script src="/static/chat.js"></script>
+<script src="/static/uploader.js"></script>
 <script src="/static/guest.js"></script>
 </body>
 </html>

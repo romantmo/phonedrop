@@ -30,11 +30,13 @@
     openId = chat.chatId = null;
     $("chatView").hidden = $("toolView").hidden = true;
     $("listView").hidden = false;
-    $("chatList").hidden = $("fabScan").hidden = $("pushBanner").hidden = true;
+    $("chatList").hidden = $("fabScan").hidden = $("pushBanner").hidden = $("googleBanner").hidden = true;
     $("tabs").hidden = $("toolsHome").hidden = true;
     $("gate").hidden = false;
-    $("gateTitle").textContent = title || "Подключи компьютер";
-    $("gateText").textContent = text || "Открой PhoneDrop на компьютере и отсканируй QR-код.";
+    $("gateTitle").textContent = title || "Добро пожаловать";
+    $("gateText").textContent = text || "Войди через Google — и пользуйся без компьютера. Или открой PhoneDrop на своём компьютере и отсканируй QR-код.";
+    // Кнопку Google показываем, только если вход через Google настроен на сервере.
+    fetch("/api/login-info").then((r) => r.json()).then((d) => { $("gateGoogle").hidden = !d.google; }).catch(() => {});
     $("gateInstall").hidden = !installEvent;
   }
 
@@ -70,7 +72,11 @@
     const tools = tab === "tools";
     $("toolsHome").hidden = !tools;
     $("chatList").hidden = $("fabScan").hidden = tools;
-    $("pushBanner").hidden = tools || !(chats.length && push.status() === "default");
+    const acc = info && info.account;
+    $("googleBanner").hidden = !(info && info.google && acc && !acc.google);
+    $("pushBanner").hidden = tools || !$("googleBanner").hidden || !(chats.length && push.status() === "default");
+    $("menuAccount").hidden = !(info && info.google);
+    $("menuAccount").textContent = acc && acc.google ? `👤 ${acc.email} · выйти` : "🔐 Привязать Google";
     if (tools) {
       PDTools.renderHome($("toolsHome"), (id) => openTool(id));
       return;
@@ -204,6 +210,20 @@
   });
 
   // ---------- старт
+  // После входа через Google сервер возвращает сюда с ?login=ok или ?login_error=…
+  if (params.get("login_error")) toast(params.get("login_error"), true);
+  else if (params.get("login") === "ok") toast("Вход выполнен ✅");
+  if (params.has("login") || params.has("login_error")) history.replaceState(null, "", "/chat");
+
+  $("menuAccount").addEventListener("click", async () => {
+    const acc = info && info.account;
+    if (!acc || !acc.google) { location.href = "/auth/google?role=phone"; return; }
+    if (!confirm(`Выйти из ${acc.email} на этом телефоне? Войти снова можно через Google.`)) return;
+    try { await api(ROLE, "/api/phone/logout", { method: "POST" }); } catch (e) { return toast(e.message, true); }
+    chats = [];
+    showGate("Ты вышел", "Войди через Google, чтобы вернуться к своим чатам.");
+  });
+
   async function start() {
     // Пришли по ссылке из QR: /pair/<код>. Код тратим POST-запросом и убираем из адреса.
     const match = location.pathname.match(/^\/pair\/([\w-]+)$/);

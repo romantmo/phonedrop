@@ -162,3 +162,4 @@
 .tabs button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
   min-height: 58px; border-radius: 16px; font-size: 13px; line-height: 1.1; }
 .tabs .ti { font-size: 20px; }
+#pcGoogle { margin-top: 12px; }

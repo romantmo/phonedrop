@@ -29,7 +29,8 @@
       <h2>Отсканируй камерой телефона</h2>
       <p>Код одноразовый — после сканирования он сгорает.</p>
       <p class="expires" id="pairExpires"></p>
-      <a class="btn block get-link" href="/get">📥 Мне прислали код — получить файлы</a>
+      <a class="btn block google-btn" id="pcGoogle" href="/auth/google?role=pc" hidden>Войти через Google</a>
+      <a class="btn block get-link" href="/get">🔑 У меня есть код</a>
       <p class="pair-tip">Уже переписывался с этим компьютером, но вход слетел? На телефоне открой его чат → ⋮ → <b>«Переподключить компьютер»</b> — переписка вернётся.</p>
     </section>
 
@@ -120,7 +121,7 @@
     </header>
     <div class="tr-switch seg">
       <button type="button" id="trModeMine" class="on">💻 Мои компьютеры</button>
-      <button type="button" id="trModeShare">🌍 Другому человеку</button>
+      <button type="button" id="trModeShare">🌍 Обмен с людьми</button>
     </div>
     <div class="tr-body" id="shareBody" hidden></div>
     <div class="tr-body" id="mineBody">

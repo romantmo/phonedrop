@@ -285,6 +285,20 @@ class Settings:
     transfer_quota_mb: int = field(default_factory=lambda: _env_int("TRANSFER_QUOTA_MB", 20480))
     transfer_ttl_hours: int = field(default_factory=lambda: _env_int("TRANSFER_TTL_HOURS", 24))
     transfer_chunk_mb: int = field(default_factory=lambda: _env_int("TRANSFER_CHUNK_MB", 8))
+    # Вход через Google. Ключи лежат только на сервере (файл .env), не в GitHub.
+    google_client_id: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_ID", ""))
+    google_client_secret: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_SECRET", ""))
+    allowed_emails: set = field(default_factory=lambda: {
+        e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()})
+
+    @property
+    def google_enabled(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
+
+    @property
+    def login_required(self) -> bool:
+        # Как только включён вход через Google, новые телефоны без него аккаунт не получают.
+        return self.google_enabled
 
 
 class PushGone(Exception):
@@ -305,6 +319,7 @@ class Store:
         self.transfers_root = settings.data_dir / "transfers"
         self.transfer_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.converter_transport = None  # в тестах сюда подставляется конвертер «в памяти»
+        self.google_transport = None     # в тестах — «поддельный Google»
         self.preview_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.db: sqlite3.Connection | None = None
         self.pc_sockets: dict[str, set[WebSocket]] = defaultdict(set)  # компьютер -> соединения
@@ -329,10 +344,23 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
+        self._migrate()
         # После перезапуска (например, деплоя) даём «чужим» компьютерам время переподключиться.
         self.run("UPDATE devices SET last_seen=? WHERE mode='temp' OR account_id IS NULL", time.time())
         self._load_vapid()
         self._load_secret()
+
+    def _migrate(self) -> None:
+        """Новые колонки для уже существующей базы (на сервере база живёт между версиями)."""
+        def add(table: str, column: str, ddl: str) -> None:
+            if column not in {r["name"] for r in self.q(f"PRAGMA table_info({table})")}:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        add("accounts", "google_sub", "google_sub TEXT")
+        add("accounts", "email", "email TEXT")
+        add("shares", "kind", "kind TEXT NOT NULL DEFAULT 'send'")
+        add("shares", "max_bytes", "max_bytes INTEGER NOT NULL DEFAULT 0")
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS accounts_by_google ON accounts(google_sub) "
+                        "WHERE google_sub IS NOT NULL")
 
     def close(self) -> None:
         if self.db:
@@ -418,11 +446,10 @@ class Store:
         account = self.account_by_token(phone_token)
         new_token = None
         if account is None:
-            new_token = secrets.token_urlsafe(32)
-            aid = uuid.uuid4().hex
-            self.run("INSERT INTO accounts (id, token_hash, created, last_active) VALUES (?,?,?,?)",
-                     aid, token_hash(new_token), now, now)
-            account = self.one("SELECT * FROM accounts WHERE id=?", aid)
+            if self.settings.login_required:
+                # Новый человек не может просто так завести аккаунт на твоём сервере — сначала вход через Google.
+                raise HTTPException(401, "Сначала войди через Google — кнопка на главном экране приложения")
+            account, new_token = self.create_account()
         count = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id=?", account["id"])["n"]
         if count >= MAX_DEVICES:
             raise HTTPException(409, f"Подключено максимум компьютеров ({MAX_DEVICES}). Отключи ненужные")
@@ -435,6 +462,15 @@ class Store:
             raise HTTPException(410, "Код уже использован")
         self.run("UPDATE accounts SET last_active=? WHERE id=?", now, account["id"])
         return self.device(dev["id"]), account, new_token, None
+
+    def link_pc(self, dev: sqlite3.Row, account: sqlite3.Row) -> sqlite3.Row:
+        """Подключить компьютер к аккаунту без QR — после входа через Google на самом компьютере."""
+        count = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id=?", account["id"])["n"]
+        if count >= MAX_DEVICES:
+            raise HTTPException(409, f"Подключено максимум компьютеров ({MAX_DEVICES}). Отключи ненужные")
+        self.run("UPDATE devices SET account_id=?, pair_hash=NULL, pair_expires=0, last_seen=? "
+                 "WHERE id=? AND account_id IS NULL", account["id"], time.time(), dev["id"])
+        return self.device(dev["id"])
 
     def reattach_pc(self, chat: sqlite3.Row, code: str) -> tuple[sqlite3.Row, sqlite3.Row]:
         """«Переподключить компьютер» с телефона: браузер компьютера потерял вход
@@ -463,7 +499,28 @@ class Store:
         self.run("UPDATE devices SET pair_hash=NULL, pair_expires=0 WHERE id=?", dev["id"])
         if current and current["id"] == target["id"]:
             return dev, target, None, None  # это и так тот же телефон
-        if current:
+        if current and current["google_sub"] and not target["google_sub"]:
+            # Телефон уже вошёл через Google, а компьютер — из «старого» аккаунта без Google:
+            # переносим компьютеры старого аккаунта в Google-аккаунт, вход через Google сохраняется.
+            total = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id IN (?,?)",
+                             target["id"], current["id"])["n"]
+            if total > MAX_DEVICES:
+                raise HTTPException(409, f"Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные")
+            old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
+            for table in ("devices", "transfers", "shares"):
+                self.run(f"UPDATE {table} SET account_id=? WHERE account_id=?", current["id"], target["id"])
+            self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{target['id']}")
+            self.delete_owner_tools(f"acc:{target['id']}")
+            self.run("DELETE FROM accounts WHERE id=?", target["id"])
+            return self.device(dev["id"]), current, None, old_subs
+        target, new_token, old_subs = self.take_over_phone(target, current)
+        return dev, target, new_token, old_subs
+
+    def take_over_phone(self, target: sqlite3.Row, current: sqlite3.Row | None):
+        """Этот телефон становится телефоном аккаунта target: новый ключ, старый телефон отключается.
+        Если у телефона был свой аккаунт без Google — его компьютеры и посылки переезжают в target."""
+        merge = current is not None and current["id"] != target["id"] and not current["google_sub"]
+        if merge:
             total = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id IN (?,?)",
                              target["id"], current["id"])["n"]
             if total > MAX_DEVICES:
@@ -471,15 +528,23 @@ class Store:
         old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
         self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{target['id']}")  # старый телефон больше не получает
         new_token = secrets.token_urlsafe(32)
-        self.run("UPDATE accounts SET token_hash=?, last_active=? WHERE id=?", token_hash(new_token), now, target["id"])
-        if current:
+        self.run("UPDATE accounts SET token_hash=?, last_active=? WHERE id=?", token_hash(new_token), time.time(), target["id"])
+        if merge:
             self.run("UPDATE devices SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE transfers SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE shares SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE push_subs SET owner=? WHERE owner=?", f"acc:{target['id']}", f"acc:{current['id']}")
             self.delete_owner_tools(f"acc:{current['id']}")
             self.run("DELETE FROM accounts WHERE id=?", current["id"])
-        return dev, self.one("SELECT * FROM accounts WHERE id=?", target["id"]), new_token, old_subs
+        return self.one("SELECT * FROM accounts WHERE id=?", target["id"]), new_token, old_subs
+
+    def create_account(self, google_sub: str | None = None, email: str | None = None) -> tuple[sqlite3.Row, str]:
+        token = secrets.token_urlsafe(32)
+        aid = uuid.uuid4().hex
+        now = time.time()
+        self.run("INSERT INTO accounts (id, token_hash, created, last_active, google_sub, email) VALUES (?,?,?,?,?,?)",
+                 aid, token_hash(token), now, now, google_sub, email)
+        return self.one("SELECT * FROM accounts WHERE id=?", aid), token
 
     def delete_device(self, device_id: str) -> None:
         for t in self.q("SELECT id FROM transfers WHERE to_dev=?", device_id):
@@ -888,7 +953,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         csp = CSP + (f" wss://{host} ws://{host}" if HOST_RE.fullmatch(host) else "")
         path = request.url.path
         is_guest_file = path.startswith("/g/") and path.count("/") >= 3  # /g/<ключ>/<файл>
-        if not path.startswith(("/f/", "/t/", "/s/", "/x/")) and not is_guest_file:  # для файлов политику ставят сами обработчики
+        owner_file = path.startswith("/api/shares/") and path.endswith("/download")
+        if not path.startswith(("/f/", "/t/", "/s/", "/x/")) and not is_guest_file and not owner_file:  # для файлов политику ставят сами обработчики
             h.setdefault("Content-Security-Policy", csp)
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
@@ -973,6 +1039,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def common_info() -> dict:
         return {
+            "google": settings.google_enabled,
             "max_upload_mb": settings.max_upload_mb,
             "file_ttl_days": settings.file_ttl_days,
             "vapid_key": store.vapid_public,
@@ -1329,6 +1396,150 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # -------------------------------------------------------------- телефон
 
+    async def kick_old_phone(acc: sqlite3.Row, old: sqlite3.Row | None, old_subs: list) -> None:
+        """Старый телефон аккаунта: закрываем его соединения и предупреждаем последним уведомлением."""
+        for key in {acc["id"], old["id"] if old else None} - {None}:
+            for ws in list(store.phone_sockets.pop(key, set())):
+                try:
+                    await ws.send_json({"type": "closed", "reason": "relinked"})
+                    await ws.close(code=4000)
+                except Exception:
+                    pass
+        for sub in old_subs:
+            task = asyncio.create_task(store._push_one(sub, {
+                "title": "PhoneDrop", "url": "/chat", "tag": "relinked",
+                "body": "Твои чаты открыты на другом телефоне. Если это был не ты — войди снова и смени пароль Google."}))
+            store.push_tasks.add(task)
+            task.add_done_callback(store.push_tasks.discard)
+        for d in store.q("SELECT * FROM devices WHERE account_id=?", acc["id"]):
+            await store.presence(d)
+
+    # ------------------------------------------------------- вход через Google
+    # Стандарт OpenID Connect: «код авторизации» + PKCE + state + nonce.
+    # Мы получаем от Google только адрес почты и постоянный номер аккаунта (sub). Пароль Google мы не видим.
+    GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth"
+    GOOGLE_TOKEN = "https://oauth2.googleapis.com/token"
+    OAUTH_COOKIE = "pd_oauth"
+
+    def b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    def sign(payload: dict) -> str:
+        body = b64url(json.dumps(payload, separators=(",", ":")).encode())
+        return body + "." + store.keyed_hash(body)
+
+    def unsign(value: str | None) -> dict | None:
+        if not value or "." not in value:
+            return None
+        body, mac = value.rsplit(".", 1)
+        if not hmac.compare_digest(mac, store.keyed_hash(body)):
+            return None
+        try:
+            return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        except ValueError:
+            return None
+
+    def redirect_uri() -> str:
+        return f"{settings.public_url}/auth/google/callback"
+
+    def login_failed(role: str, text: str) -> RedirectResponse:
+        target = "/chat" if role == "phone" else "/"
+        return RedirectResponse(f"{target}?login_error={quote(text)}", status_code=303)
+
+    @app.get("/auth/google", include_in_schema=False)
+    async def google_start(request: Request, role: str = "phone"):
+        if not settings.google_enabled:
+            raise HTTPException(404, "Вход через Google не настроен")
+        if role not in ROLES:
+            raise HTTPException(400, "Неизвестная роль")
+        limiter.hit(f"login:{client_ip(request)}", 30, 600)
+        state, nonce, verifier = secrets.token_urlsafe(24), secrets.token_urlsafe(24), secrets.token_urlsafe(48)
+        challenge = b64url(hashlib.sha256(verifier.encode()).digest())
+        params = {
+            "client_id": settings.google_client_id, "redirect_uri": redirect_uri(), "response_type": "code",
+            "scope": "openid email", "state": state, "nonce": nonce, "prompt": "select_account",
+            "code_challenge": challenge, "code_challenge_method": "S256",
+        }
+        response = RedirectResponse(GOOGLE_AUTH + "?" + "&".join(f"{k}={quote(v)}" for k, v in params.items()),
+                                    status_code=303)
+        response.set_cookie(OAUTH_COOKIE, sign({"s": state, "n": nonce, "v": verifier, "r": role, "t": time.time()}),
+                            max_age=600, httponly=True, samesite="lax", secure=is_https(request), path="/auth")
+        return response
+
+    @app.get("/auth/google/callback", include_in_schema=False)
+    async def google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+        saved = unsign(request.cookies.get(OAUTH_COOKIE))
+        role = saved.get("r", "phone") if saved else "phone"
+        if error:
+            return login_failed(role, "Вход отменён")
+        if not saved or not state or not hmac.compare_digest(saved.get("s", ""), state) or time.time() - saved.get("t", 0) > 600:
+            return login_failed(role, "Вход устарел — попробуй ещё раз")
+        try:
+            async with httpx.AsyncClient(transport=store.google_transport, timeout=15) as client:
+                r = await client.post(GOOGLE_TOKEN, data={
+                    "code": code, "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret, "redirect_uri": redirect_uri(),
+                    "grant_type": "authorization_code", "code_verifier": saved["v"],
+                })
+            id_token = r.json().get("id_token", "") if r.status_code == 200 else ""
+            claims = json.loads(base64.urlsafe_b64decode(id_token.split(".")[1] + "==="))
+        except Exception:
+            return login_failed(role, "Google не ответил — попробуй ещё раз")
+        # Токен пришёл напрямую от Google по HTTPS (OpenID Connect, п. 3.1.3.7) — проверяем поля.
+        ok = (claims.get("iss") in ("https://accounts.google.com", "accounts.google.com")
+              and claims.get("aud") == settings.google_client_id
+              and claims.get("exp", 0) > time.time()
+              and hmac.compare_digest(str(claims.get("nonce", "")), saved["n"])
+              and claims.get("email_verified") is True and claims.get("sub"))
+        if not ok:
+            return login_failed(role, "Google вернул неверные данные — попробуй ещё раз")
+        email = str(claims.get("email", "")).lower()
+        if settings.allowed_emails and email not in settings.allowed_emails:
+            return login_failed(role, f"Доступ закрыт: адреса {email} нет в списке разрешённых")
+        sub = str(claims["sub"])
+        account = store.one("SELECT * FROM accounts WHERE google_sub=?", sub)
+        if role == "phone":
+            current = store.account_by_token(request.cookies.get(PHONE_COOKIE))
+            new_token = None
+            if account is None and current is not None and not current["google_sub"]:
+                # Первый вход с уже работающего телефона — просто привязываем Google к нему.
+                store.run("UPDATE accounts SET google_sub=?, email=? WHERE id=?", sub, email, current["id"])
+            elif account is None:
+                account, new_token = store.create_account(sub, email)
+            elif not current or current["id"] != account["id"]:
+                account, new_token, old_subs = store.take_over_phone(account, current)
+                await kick_old_phone(account, current, old_subs)
+            response = RedirectResponse("/chat?login=ok", status_code=303)
+            if new_token:
+                set_phone_cookie(response, request, new_token)
+        else:
+            dev = store.device_by_token(request.cookies.get(PC_COOKIE))
+            if not dev:
+                return login_failed(role, "Обнови страницу и попробуй ещё раз")
+            if account is None:
+                account, _ = store.create_account(sub, email)  # ключ телефона появится, когда войдёшь на телефоне
+            if dev["account_id"] and dev["account_id"] != account["id"]:
+                return login_failed(role, "Этот компьютер уже подключён к другому аккаунту — сначала отключи его")
+            if not dev["account_id"]:
+                try:
+                    dev = store.link_pc(dev, account)
+                except HTTPException as exc:
+                    return login_failed(role, exc.detail)
+                await store.send_ws(store.phone_sockets.get(account["id"], set()),
+                                    {"type": "chats_changed", "chat_id": dev["id"]})
+            response = RedirectResponse("/?login=ok", status_code=303)
+        response.delete_cookie(OAUTH_COOKIE, path="/auth")
+        return response
+
+    @app.post("/api/phone/logout")
+    async def phone_logout(request: Request):
+        acc = require_phone(request)
+        if not acc["google_sub"]:
+            raise HTTPException(409, "Сначала привяжи Google — иначе после выхода не сможешь вернуться к своим чатам")
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(PHONE_COOKIE, path="/")
+        return response
+
     @app.post("/api/pair/{code}")
     async def pair(code: str, request: Request):
         role_of(request, "phone")
@@ -1337,23 +1548,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dev, acc, new_token, old_subs = store.consume_pair_code(code, request.cookies.get(PHONE_COOKIE))
         relinked = old_subs is not None
         if relinked:
-            # Старый телефон: закрываем его соединения и предупреждаем последним уведомлением.
-            for key in {acc["id"], old["id"] if old else None} - {None}:
-                for ws in list(store.phone_sockets.pop(key, set())):
-                    try:
-                        await ws.send_json({"type": "closed", "reason": "relinked"})
-                        await ws.close(code=4000)
-                    except Exception:
-                        pass
-            for sub in old_subs:
-                task = asyncio.create_task(store._push_one(sub, {
-                    "title": "PhoneDrop", "url": "/chat", "tag": "relinked",
-                    "body": "Твои чаты открыты на другом телефоне. Если это был не ты — переподключи телефон через свой компьютер."}))
-                store.push_tasks.add(task)
-                task.add_done_callback(store.push_tasks.discard)
             await store.send_ws(store.pc_sockets.get(dev["id"], set()), {"type": "relinked"})
-            for d in store.q("SELECT * FROM devices WHERE account_id=?", acc["id"]):
-                await store.presence(d)
+            await kick_old_phone(acc, old, old_subs)
         else:
             await store.send_ws(store.pc_sockets.get(dev["id"], set()), {"type": "linked"})
         await store.send_ws(store.phone_sockets.get(acc["id"], set()), {"type": "chats_changed", "chat_id": dev["id"]})
@@ -1362,10 +1558,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             set_phone_cookie(response, request, new_token)
         return response
 
+    @app.get("/api/login-info")
+    async def login_info():
+        return {"google": settings.google_enabled}
+
     @app.get("/api/phone/chats")
     async def phone_chats(request: Request):
         acc = require_phone(request)
         data = common_info()
+        data["account"] = {"email": acc["email"], "google": bool(acc["google_sub"])}
         data["chats"] = store.phone_chats(acc["id"])
         return data
 
@@ -1661,7 +1862,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def share_owner_public(row: sqlite3.Row) -> dict:
         return {"id": row["id"], "owner_label": row["owner_label"], "created": row["created"],
                 "expires": row["expires"], "once": bool(row["once"]), "notify": bool(row["notify"]),
-                "has_password": bool(row["pw_hash"]), "files": store.share_files(row["id"])}
+                "has_password": bool(row["pw_hash"]), "files": store.share_files(row["id"]),
+                "kind": row["kind"], "max_bytes": row["max_bytes"]}
 
     async def shares_changed(row: sqlite3.Row) -> None:
         kind, _, key = row["owner"].partition(":")
@@ -1695,12 +1897,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         token, code = new_share_secrets()
         sid = uuid.uuid4().hex
         now = time.time()
+        # kind="request" — «Попросить файлы»: по коду люди ЗАГРУЖАЮТ файлы тебе (до max_mb), скачать ничего не могут.
+        kind = "request" if body.get("kind") == "request" else "send"
+        max_mb = body.get("max_mb") if isinstance(body.get("max_mb"), int) else settings.transfer_max_mb
+        max_bytes = min(max(max_mb, 1), settings.transfer_max_mb) * MB if kind == "request" else 0
+        if kind == "request":
+            password, salt = "", None
         store.run("INSERT INTO shares (id, account_id, owner, owner_label, token_hash, code_hash, pw_salt, pw_hash, "
-                  "once, notify, created, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  "once, notify, created, expires, kind, max_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   sid, account_of(role, who), owner, sender,
                   store.keyed_hash(token), store.keyed_hash(code), salt.hex() if salt else None,
                   hash_password(password, salt) if password else None,
-                  int(bool(body.get("once"))), int(body.get("notify", True) is not False), now, now + hours * 3600)
+                  int(bool(body.get("once"))) if kind == "send" else 0, int(body.get("notify", True) is not False),
+                  now, now + hours * 3600, kind, max_bytes)
         row = store.one("SELECT * FROM shares WHERE id=?", sid)
         return {"share": share_owner_public(row), **share_links(request, token, code)}
 
@@ -1835,6 +2044,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/g/{ref}")
     async def guest_share(ref: str, request: Request):
         row = share_by_ref(ref)
+        if row["kind"] == "request":
+            # Отправителю не показываем, что уже лежит в «ящике», — только сколько места осталось.
+            used = store.one("SELECT COALESCE(SUM(size), 0) AS n FROM share_files WHERE share_id=?", row["id"])["n"]
+            return {"kind": "request", "owner_label": row["owner_label"], "expires": row["expires"],
+                    "max_bytes": row["max_bytes"], "left_bytes": max(0, row["max_bytes"] - used),
+                    "chunk_mb": settings.transfer_chunk_mb}
         if not guest_allowed(row, request):
             return JSONResponse({"password": True, "owner_label": row["owner_label"]}, status_code=401)
         files = store.share_files(row["id"])
@@ -1844,9 +2059,88 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "uploading": [{"name": f["name"], "size": f["size"], "received": f["received"]}
                               for f in files if not f["done"]]}
 
+    # ---------- «Попросить файлы»: гость загружает файлы владельцу
+
+    def request_share(ref: str, request: Request) -> sqlite3.Row:
+        check_origin(request.headers)
+        row = share_by_ref(ref)
+        if row["kind"] != "request":
+            raise HTTPException(403, "По этой ссылке можно только скачивать")
+        return row
+
+    @app.post("/api/g/{ref}/files")
+    async def guest_add_file(ref: str, request: Request):
+        row = request_share(ref, request)
+        limiter.hit(f"guest-up:{client_ip(request)}", 100, 600)
+        body = await request.json()
+        size = body.get("size") if isinstance(body, dict) else None
+        if not isinstance(size, int) or size <= 0:
+            raise HTTPException(400, "Пустой файл отправлять незачем")
+        used = store.one("SELECT COALESCE(SUM(size), 0) AS n FROM share_files WHERE share_id=?", row["id"])["n"]
+        if used + size > row["max_bytes"]:
+            raise HTTPException(413, f"Не помещается: осталось {round(max(0, row['max_bytes'] - used) / MB)} МБ из "
+                                     f"{round(row['max_bytes'] / MB)} МБ, которые разрешил получатель")
+        if store.one("SELECT COUNT(*) AS n FROM share_files WHERE share_id=?", row["id"])["n"] >= 200:
+            raise HTTPException(400, "Слишком много файлов — не больше 200")
+        check_space(row["account_id"], size)
+        name = safe_filename(body.get("name") if isinstance(body.get("name"), str) else "")
+        fid = uuid.uuid4().hex
+        store.run("INSERT INTO share_files (id, share_id, name, size, mime, created) VALUES (?,?,?,?,?,?)",
+                  fid, row["id"], name, size, mimetypes.guess_type(name)[0] or "application/octet-stream", time.time())
+        store.share_path(fid).touch()
+        return {"id": fid, "received": 0, "size": size}
+
+    @app.get("/api/g/{ref}/files/{fid}")
+    async def guest_file_status(ref: str, fid: str, request: Request):
+        row = request_share(ref, request)
+        f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=?", fid, row["id"])
+        if not f:
+            raise HTTPException(404, "Файл не найден")
+        return {"received": f["received"], "done": bool(f["done"])}
+
+    @app.put("/api/g/{ref}/files/{fid}/data")
+    async def guest_upload_chunk(ref: str, fid: str, request: Request, offset: int = -1):
+        row = request_share(ref, request)
+        async with store.transfer_locks[fid]:
+            f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=?", fid, row["id"])
+            if not f:
+                raise HTTPException(404, "Файл не найден")
+            if f["done"]:
+                return {"received": f["received"], "done": True}
+            if offset != f["received"]:
+                return JSONResponse({"detail": "Не то место в файле", "received": f["received"]}, status_code=409)
+            received = await write_chunk(store.share_path(fid), f["size"], offset, request)
+            done = time.time() if received == f["size"] else None
+            store.run("UPDATE share_files SET received=?, done=? WHERE id=?", received, done, fid)
+        if done:
+            if row["notify"]:
+                store.push(row["owner"], {"title": "📥 Тебе прислали файл", "body": f"{f['name']} · {round(f['size'] / MB, 1)} МБ",
+                                          "url": "/" if row["owner"].startswith("dev:") else "/chat", "tag": f"req-{fid}"})
+            await shares_changed(row)
+        return {"received": received, "done": bool(done)}
+
+    @app.get("/api/shares/{sid}/files/{fid}/download")
+    async def owner_download(sid: str, fid: str, request: Request):
+        """Владелец скачивает то, что ему прислали (или то, что сам выложил). С докачкой."""
+        owners = owner_from_cookies(request)
+        accounts = set()
+        for o in owners:
+            kind, _, key = o.partition(":")
+            row = store.device(key) if kind == "dev" else store.one("SELECT * FROM accounts WHERE id=?", key)
+            if row:
+                accounts.add(row["account_id"] if kind == "dev" else row["id"])
+        share = store.one("SELECT * FROM shares WHERE id=?", sid)
+        f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=? AND done IS NOT NULL", fid, sid)
+        if not share or share["account_id"] not in accounts or not f:
+            raise HTTPException(404, "Файл не найден — возможно, срок вышел")
+        return FileResponse(store.share_path(fid), media_type="application/octet-stream", filename=f["name"],
+                            content_disposition_type="attachment", headers={"Content-Security-Policy": "sandbox"})
+
     @app.get("/g/{ref}/{fid}")
     async def guest_download(ref: str, fid: str, request: Request):
         row = share_by_ref(ref)
+        if row["kind"] == "request":
+            raise HTTPException(404, "Файл не найден")  # из «ящика» гость ничего скачать не может
         if not guest_allowed(row, request):
             raise HTTPException(403, "Сначала введи пароль")
         f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=? AND done IS NOT NULL", fid, row["id"])

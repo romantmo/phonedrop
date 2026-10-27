@@ -1187,3 +1187,178 @@ def test_phone_opening_main_page_goes_to_phone_app(client):
     assert client.get("/?desktop=1", headers={"User-Agent": android}).status_code == 200  # вручную — можно
     assert client.get("/", headers={"User-Agent": tablet}, follow_redirects=False).status_code == 200
     assert client.get("/", headers={"User-Agent": WIN_UA}, follow_redirects=False).status_code == 200
+
+
+# ------------------------------------------------------------ вход через Google
+
+class FakeGoogle:
+    """Поддельный Google: отвечает на обмен кода так, как ответил бы настоящий."""
+
+    def __init__(self):
+        self.next = None  # какие данные «вернуть» при следующем входе
+
+    def __call__(self, request):
+        import base64 as b64
+        import json as js
+        claims = self.next
+        enc = lambda d: b64.urlsafe_b64encode(js.dumps(d).encode()).rstrip(b"=").decode()
+        return httpx.Response(200, json={"id_token": f"{enc({'alg': 'RS256'})}.{enc(claims)}.signature"})
+
+
+@pytest.fixture
+def gclient(settings):
+    settings.google_client_id = "test-client"
+    settings.google_client_secret = "test-secret"
+    settings.allowed_emails = {"roman@example.com", "friend@example.com"}
+    with TestClient(create_app(settings), base_url=BASE) as c:
+        c.google = FakeGoogle()
+        c.app.state.store.google_transport = httpx.MockTransport(c.google)
+        c.pusher = Pusher()
+        c.app.state.store.push_sender = c.pusher
+        yield c
+
+
+def google_login(dev, role, email, sub, **override):
+    from urllib.parse import parse_qs, urlsplit
+
+    r = dev.get(f"/auth/google?role={role}")
+    assert r.status_code == 303 and r.headers["location"].startswith("https://accounts.google.com/")
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    assert q["code_challenge_method"] == ["S256"] and q["scope"] == ["openid email"]
+    dev.client.google.next = {"iss": "https://accounts.google.com", "aud": "test-client", "sub": sub,
+                              "email": email, "email_verified": True, "exp": time.time() + 600,
+                              "nonce": q["nonce"][0], **override}
+    return dev.get(f"/auth/google/callback?code=abc&state={q['state'][0]}")
+
+
+def test_new_phone_logs_in_with_google_without_computer(gclient):
+    phone = Device(gclient, "phone")
+    r = google_login(phone, "phone", "Roman@Example.com", "g-1")
+    assert r.headers["location"] == "/chat?login=ok"
+    data = phone.get("/api/phone/chats").json()
+    assert data["chats"] == [] and data["account"] == {"email": "roman@example.com", "google": True}
+    # без компьютера уже можно отправлять посылки
+    assert phone.post("/api/shares", json={}).status_code == 200
+
+
+def test_google_login_restores_account_on_new_phone(gclient):
+    phone = Device(gclient, "phone")
+    google_login(phone, "phone", "roman@example.com", "g-1")
+    pc = Device(gclient, "pc")
+    chat_id = pair(pc, phone)
+    new_phone = Device(gclient, "phone")  # потерял телефон / переустановил
+    google_login(new_phone, "phone", "roman@example.com", "g-1")
+    assert [c["id"] for c in new_phone.get("/api/phone/chats").json()["chats"]] == [chat_id]
+    assert phone.get("/api/phone/chats").status_code == 401  # старый телефон отключён
+
+
+def test_google_login_binds_existing_phone(gclient, settings):
+    # телефон, подключённый ещё по старой схеме (до входа через Google)
+    settings.google_client_id = ""
+    pc, phone = Device(gclient, "pc"), Device(gclient, "phone")
+    chat_id = pair(pc, phone)
+    settings.google_client_id = "test-client"
+    google_login(phone, "phone", "roman@example.com", "g-1")
+    data = phone.get("/api/phone/chats").json()
+    assert data["account"]["google"] is True and [c["id"] for c in data["chats"]] == [chat_id]
+
+
+def test_only_allowed_emails_and_valid_tokens(gclient):
+    phone = Device(gclient, "phone")
+    r = google_login(phone, "phone", "stranger@example.com", "g-9")
+    assert "login_error" in r.headers["location"] and "PHONE" not in str(phone.cookies)
+    assert phone.get("/api/phone/chats").status_code == 401
+    for bad in ({"aud": "someone-else"}, {"nonce": "wrong"}, {"email_verified": False}, {"exp": 1}):
+        r = google_login(Device(gclient, "phone"), "phone", "roman@example.com", "g-1", **bad)
+        assert "login_error" in r.headers["location"], bad
+    # подделанный state (CSRF при входе)
+    r = Device(gclient, "phone").get("/auth/google/callback?code=x&state=forged")
+    assert "login_error" in r.headers["location"]
+
+
+def test_qr_pairing_requires_login_for_brand_new_phone(gclient):
+    pc = Device(gclient, "pc")
+    r = Device(gclient, "phone").post(f"/api/pair/{code_of(open_pc(pc))}")
+    assert r.status_code == 401 and "Google" in r.json()["detail"]
+
+
+def test_computer_logs_in_with_google_instead_of_qr(gclient):
+    phone = Device(gclient, "phone")
+    google_login(phone, "phone", "roman@example.com", "g-1")
+    pc = Device(gclient, "pc")
+    open_pc(pc)
+    r = google_login(pc, "pc", "roman@example.com", "g-1")
+    assert r.headers["location"] == "/?login=ok"
+    state = pc.get("/api/state").json()
+    assert state["linked"] is True and state["device"]["mode"] == "temp"  # по умолчанию «чужой» — безопасно
+    assert len(phone.get("/api/phone/chats").json()["chats"]) == 1
+    # чужой Google не подключит компьютер к твоему аккаунту
+    other_pc = Device(gclient, "pc")
+    open_pc(other_pc)
+    google_login(other_pc, "pc", "friend@example.com", "g-2")
+    assert len(phone.get("/api/phone/chats").json()["chats"]) == 1
+
+
+def test_phone_logout_only_with_google(gclient, settings):
+    phone = Device(gclient, "phone")
+    google_login(phone, "phone", "roman@example.com", "g-1")
+    assert phone.post("/api/phone/logout").status_code == 200
+    assert phone.get("/api/phone/chats").status_code == 401
+
+
+# ---------------------------------------------------- «Попросить файлы»
+
+def test_request_files_from_stranger_abroad(client, pc, phone):
+    pair(pc, phone)
+    sub = {"endpoint": "https://push.example/me", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+    phone.post("/api/push/subscribe", json=sub)
+    req = phone.post("/api/shares", json={"kind": "request", "hours": 24, "max_mb": 1, "name": "Роман"}).json()
+    sid = req["share"]["id"]
+    assert req["share"]["kind"] == "request"
+    stranger = Device(client, "guest")
+    ref = stranger.post("/api/get/code", json={"code": req["code"]}).json()["ref"]
+    info = stranger.get(f"/api/g/{ref}").json()
+    assert info["kind"] == "request" and info["owner_label"] == "Роман" and "files" not in info
+    f = stranger.post(f"/api/g/{ref}/files", json={"name": "отчёт.pdf", "size": 5}).json()
+    r = stranger.request("PUT", f"/api/g/{ref}/files/{f['id']}/data", params={"offset": 0}, content=b"12345",
+                         headers={"Content-Type": "application/octet-stream"})
+    assert r.json()["done"] is True
+    # получатель видит и скачивает
+    files = phone.get("/api/shares").json()["shares"][0]["files"]
+    assert [x["name"] for x in files] == ["отчёт.pdf"]
+    got = phone.get(f"/api/shares/{sid}/files/{f['id']}/download")
+    assert got.content == b"12345" and got.headers["content-security-policy"] == "sandbox"
+    assert pc.get(f"/api/shares/{sid}/files/{f['id']}/download").content == b"12345"  # и с компьютера
+    client.portal.call(store(client).flush_push)
+    assert "отчёт.pdf" in dict(client.pusher.sent)["https://push.example/me"]
+    # гость не может скачать ни свой, ни чужие файлы из «ящика»
+    assert stranger.get(f"/g/{ref}/{f['id']}").status_code == 404
+    # лимит размера, заданный получателем
+    big = stranger.post(f"/api/g/{ref}/files", json={"name": "big.iso", "size": 2 * 1024 * 1024})
+    assert big.status_code == 413
+    # чужой аккаунт не скачает
+    other = Device(client, "phone")
+    pair(Device(client, "pc"), other)
+    assert other.get(f"/api/shares/{sid}/files/{f['id']}/download").status_code == 404
+
+
+def test_cannot_upload_into_normal_share(client, pc, phone):
+    pair(pc, phone)
+    share = pc.post("/api/shares", json={}).json()
+    ref = share["link"].rsplit("/g/", 1)[1]
+    assert Device(client, "guest").post(f"/api/g/{ref}/files", json={"name": "x", "size": 1}).status_code == 403
+
+
+def test_google_phone_relinks_old_computer_and_keeps_google(gclient, settings):
+    settings.google_client_id = ""  # «до v1.6»: компьютер подключён старым способом
+    legion, old_phone = Device(gclient, "pc"), Device(gclient, "phone")
+    chat_id = pair(legion, old_phone)
+    legion.post("/api/pc/mode", json={"mode": "remember"})
+    settings.google_client_id = "test-client"
+    new_phone = Device(gclient, "phone")
+    google_login(new_phone, "phone", "roman@example.com", "g-1")  # новый телефон вошёл через Google
+    code = legion.post("/api/pc/relink").json()["pair"]["url"].rsplit("/", 1)[1]
+    assert new_phone.post(f"/api/pair/{code}").json()["relinked"] is True
+    data = new_phone.get("/api/phone/chats").json()
+    assert [c["id"] for c in data["chats"]] == [chat_id] and data["account"]["google"] is True
+    assert old_phone.get("/api/phone/chats").status_code == 401

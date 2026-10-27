@@ -9,7 +9,8 @@ window.PDShares = (() => {
   let box = null;           // куда рисуем
   let data = null;          // ответ /api/shares
   let picked = [];
-  const opts = { hours: 24, password: "", once: false, notify: true, name: "" };
+  const opts = { hours: 24, password: "", once: false, notify: true, name: "", kind: "send", max_mb: 10240 };
+  const LIMITS = [[1024, "1 ГБ"], [5120, "5 ГБ"], [10240, "10 ГБ"]];
   try { opts.name = localStorage.getItem("pd-share-name") || ""; } catch { /* не страшно */ }
   const jobs = new Map();   // id файла → загрузчик
   let fresh = null;         // только что созданная посылка (крупная карточка с кодом)
@@ -83,8 +84,9 @@ window.PDShares = (() => {
 
   // ---------- создание посылки
   async function create() {
-    if (!picked.length) return toast("Сначала выбери файлы", true);
-    const files = picked.slice();
+    const request = opts.kind === "request";
+    if (!request && !picked.length) return toast("Сначала выбери файлы", true);
+    const files = request ? [] : picked.slice();
     let res;
     try {
       res = await api(ROLE, "/api/shares", {
@@ -96,14 +98,32 @@ window.PDShares = (() => {
     }
     remember(res.share.id, { link: res.link, code: res.code, get_url: res.get_url });
     fresh = res.share.id;
-    picked = [];
+    picked = request ? picked : [];
     opts.password = "";
     data.shares.unshift(res.share);
     render();
-    await uploadInto(res.share, files);
+    if (files.length) await uploadInto(res.share, files);
   }
 
   // ---------- отрисовка
+  // Файл, который прислали тебе в «запрос»: скачать или удалить.
+  function inboxRow(sid, f) {
+    const bar = el("div", { class: "sh-bar" });
+    bar.style.width = (f.received / f.size) * 100 + "%";
+    return el("div", { class: "sh-file", id: "shf-" + f.id },
+      el("div", { class: "sh-finfo" },
+        el("b", {}, f.name),
+        el("small", {}, f.done ? fmtSize(f.size) : `загружается: ${Math.floor((f.received / f.size) * 100)}% из ${fmtSize(f.size)}`),
+        f.done ? null : el("div", { class: "progress" }, bar)),
+      el("div", { class: "sh-factions" },
+        f.done ? el("a", { class: "btn primary sh-dl", href: `/api/shares/${sid}/files/${f.id}/download`, download: f.name }, "⬇") : null,
+        el("button", { type: "button", class: "sh-mini danger", "aria-label": "Удалить файл", onclick: async () => {
+          if (!confirm(`Удалить «${f.name}»?`)) return;
+          try { await api(ROLE, `/api/shares/${sid}/files/${f.id}`, { method: "DELETE" }); } catch (e) { toast(e.message, true); }
+          refresh();
+        } }, "✕")));
+  }
+
   function fileRow(sid, f) {
     const job = jobs.get(f.id);
     let status;
@@ -149,6 +169,7 @@ window.PDShares = (() => {
   function shareCard(s) {
     const links = saved()[s.id];
     const big = s.id === fresh;
+    const request = s.kind === "request";
     const addInput = el("input", { type: "file", multiple: true, hidden: true });
     addInput.addEventListener("change", () => { uploadInto(s, [...addInput.files]); addInput.value = ""; });
     const head = links ? [
@@ -161,7 +182,8 @@ window.PDShares = (() => {
         canShareFiles || navigator.share ? el("button", { type: "button", class: "btn primary", onclick: () =>
           navigator.share({ title: "PhoneDrop", text: "Файлы для тебя:", url: links.link }).catch(() => {}) }, "📤") : null),
       big ? el("p", { class: "sh-say" }, "Скажи человеку: «Зайди на ", el("b", {}, links.get_url.replace(/^https?:\/\//, "")),
-        " и введи код ", el("b", {}, links.code), "»", s.has_password ? " — и назови пароль." : ".") : null,
+        " и введи код ", el("b", {}, links.code), "»", request ? " — и он сможет загрузить файлы тебе."
+          : s.has_password ? " — и назови пароль." : ".") : null,
     ] : [
       el("p", { class: "sh-say" }, "Ссылка и код показываются один раз. Если потерял — сделай новые (старые перестанут работать)."),
       el("button", { type: "button", class: "btn", onclick: async () => {
@@ -173,23 +195,24 @@ window.PDShares = (() => {
         } catch (e) { toast(e.message, true); }
       } }, "🔄 Новая ссылка и код"),
     ];
-    const badges = [`⏳ ${fmtLeft(s.expires)}`];
+    const badges = [request ? "📥 запрос файлов" : "📤 посылка", `⏳ ${fmtLeft(s.expires)}`];
+    if (request) badges.push(`до ${fmtSize(s.max_bytes)}`);
     if (s.has_password) badges.push("🔒 с паролем");
     if (s.once) badges.push("🔥 удалится после скачивания");
-    if (s.notify) badges.push("🔔 сообщу о скачивании");
+    if (s.notify) badges.push(request ? "🔔 сообщу о новых файлах" : "🔔 сообщу о скачивании");
     return el("section", { class: "sh-card" + (big ? " fresh" : "") },
       el("div", { class: "sh-badges" }, ...badges.map((b) => el("span", {}, b))),
       ...head,
-      el("div", { class: "sh-files" }, ...(s.files.length ? s.files.map((f) => fileRow(s.id, f))
-        : [el("p", { class: "sh-empty" }, "Файлов пока нет — добавь.")])),
+      el("div", { class: "sh-files" }, ...(s.files.length ? s.files.map((f) => (request ? inboxRow : fileRow)(s.id, f))
+        : [el("p", { class: "sh-empty" }, request ? "Пока ничего не прислали. Появится здесь — и придёт уведомление." : "Файлов пока нет — добавь.")])),
       el("div", { class: "sh-actions" },
-        el("button", { type: "button", class: "btn", onclick: () => addInput.click() }, "➕ Добавить файлы"),
+        request ? null : el("button", { type: "button", class: "btn", onclick: () => addInput.click() }, "➕ Добавить файлы"),
         el("button", { type: "button", class: "btn danger", onclick: async () => {
           if (!confirm("Удалить посылку? Ссылка и код перестанут работать.")) return;
           for (const f of s.files) { const j = jobs.get(f.id); if (j) j.pause(); jobs.delete(f.id); }
           try { await api(ROLE, `/api/shares/${s.id}`, { method: "DELETE" }); } catch (e) { toast(e.message, true); }
           refresh();
-        } }, "Удалить посылку"),
+        } }, request ? "Закрыть запрос" : "Удалить посылку"),
         addInput));
   }
 
@@ -223,7 +246,27 @@ window.PDShares = (() => {
       return el("label", { class: "sh-check" }, c, el("span", {}, label));
     };
     const total = picked.reduce((n, f) => n + f.size, 0);
+    const request = opts.kind === "request";
+    const modes = el("div", { class: "seg sh-modes" },
+      el("button", { type: "button", class: request ? "" : "on", onclick: () => { opts.kind = "send"; render(); } }, "📤 Отправить файлы"),
+      el("button", { type: "button", class: request ? "on" : "", onclick: () => { opts.kind = "request"; render(); } }, "📥 Попросить файлы"));
+    if (request) {
+      return el("section", { class: "sh-card" },
+        modes,
+        el("p", { class: "sh-say" }, "Получишь код и ссылку. Человек вводит код на сайте и загружает файлы тебе — без регистрации. Видеть или скачивать что-то он не сможет."),
+        el("h4", {}, "Человек увидит: «Отправь файлы для …»"),
+        who,
+        el("h4", {}, "Сколько ждать файлы"),
+        el("div", { class: "seg" }, ...HOURS.map(([h, label]) => el("button", { type: "button", class: opts.hours === h ? "on" : "",
+          onclick: () => { opts.hours = h; render(); } }, label))),
+        el("h4", {}, "Сколько можно прислать всего"),
+        el("div", { class: "seg" }, ...LIMITS.map(([mb, label]) => el("button", { type: "button", class: opts.max_mb === mb ? "on" : "",
+          onclick: () => { opts.max_mb = mb; render(); } }, label))),
+        check("notify", "Сообщить мне, когда пришлют файл"),
+        el("button", { type: "button", class: "btn primary block sh-create", onclick: create }, "📥 Создать код для отправки мне"));
+    }
     return el("section", { class: "sh-card" },
+      modes,
       el("h3", {}, "Новая посылка"),
       drop,
       picked.length ? el("div", { class: "sh-files" }, ...picked.map((f, i) => el("div", { class: "sh-file" },
@@ -248,7 +291,7 @@ window.PDShares = (() => {
     const focused = document.activeElement && box.contains(document.activeElement) && document.activeElement.type === "text";
     if (focused) return;  // не мешаем вводить пароль
     box.replaceChildren(...[
-      ROLE === "pc" ? el("p", { class: "sh-intro" }, "Файлы для человека, которого нет в твоих устройствах: в другой стране, у клиента, у друга. Он получит их по ссылке или по коду — без регистрации.") : null,
+      ROLE === "pc" ? el("p", { class: "sh-intro" }, "Обмен файлами с человеком, которого нет в твоих устройствах: в другой стране, у клиента, у друга. По ссылке или коду — без регистрации, в обе стороны.") : null,
       ...data.shares.map(shareCard),
       createCard()].filter(Boolean));
   }

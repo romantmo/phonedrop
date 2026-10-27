@@ -9,7 +9,7 @@
   let timer = null;
 
   function show(id) {
-    for (const card of ["codeCard", "pwCard", "filesCard", "errorCard"]) $(card).hidden = card !== id;
+    for (const card of ["codeCard", "pwCard", "filesCard", "uploadCard", "errorCard"]) $(card).hidden = card !== id;
   }
 
   async function call(path, options = {}) {
@@ -39,6 +39,7 @@
       show("errorCard");
       return;
     }
+    if (data.kind === "request") return showUpload(data);
     $("filesTitle").textContent = `Файлы от «${data.owner_label}»`;
     $("filesMeta").textContent = `Доступны ещё ${left(data.expires)}`;
     const rows = data.files.map((f) => el("div", { class: "g-file" },
@@ -58,6 +59,81 @@
       : "Если скачивание прервётся — нажми «Скачать» ещё раз, браузер продолжит с того же места.";
     show("filesCard");
   }
+
+  // ---------- «Отправь файлы для …»: человек загружает файлы владельцу
+  const uploads = [];   // { name, size, job, done, error }
+  let upInfo = null;
+  function upMeta() {
+    $("upMeta").textContent = `Можно прислать ещё ${fmtSize(upInfo.left_bytes)} · ссылка работает ещё ${left(upInfo.expires)}`;
+  }
+  function showUpload(data) {
+    clearInterval(timer);  // гость видит только свои загрузки — обновлять нечего
+    upInfo = data;
+    $("upTitle").textContent = `📤 Отправь файлы для «${data.owner_label}»`;
+    upMeta();
+    renderUploads();
+    show("uploadCard");
+  }
+  function renderUploads() {
+    $("upList").replaceChildren(...uploads.map((u) => {
+      const bar = el("div", { class: "g-bar" });
+      const received = u.job ? u.job.received : 0;
+      bar.style.width = (u.done ? 100 : (received / u.size) * 100) + "%";
+      const status = u.error ? `❌ ${u.error}` : u.done ? "✅ Отправлено" : u.job ? PDUpload.statusText(u.job, u.size, fmtSize) : "в очереди…";
+      return el("div", { class: "g-file" },
+        el("span", { class: "g-ext" }, u.done ? "✓" : "⬆"),
+        el("div", { class: "g-info" }, el("b", {}, u.name), el("small", {}, status),
+          u.done || u.error ? null : el("div", { class: "progress" }, bar)));
+    }));
+  }
+  let queue = Promise.resolve();
+  function sendFiles(files) {
+    for (const file of files) {
+      const u = { name: file.name, size: file.size, done: false };
+      uploads.push(u);
+      queue = queue.then(() => sendOne(file, u));  // по одному файлу — так быстрее доходит хотя бы первый
+    }
+    renderUploads();
+  }
+  async function sendOne(file, u) {
+    const { status, data } = await call(`/api/g/${ref}/files`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, size: file.size }),
+    });
+    if (status !== 200) { u.error = (data && data.detail) || `Ошибка ${status}`; renderUploads(); return; }
+    u.job = new PDUpload.ChunkUpload({
+      file, size: file.size, received: 0, chunkMb: upInfo.chunk_mb,
+      url: (offset) => `/api/g/${ref}/files/${data.id}/data?offset=${offset}`,
+      status: async () => {
+        const r = await call(`/api/g/${ref}/files/${data.id}`);
+        return r.status === 200 ? r.data.received : null;
+      },
+      onUpdate: renderUploads,
+    });
+    try {
+      const result = await u.job.run();
+      u.done = result === "done";
+      if (result === "gone") u.error = "Получатель закрыл запрос";
+    } catch (e) {
+      u.error = e.message;
+    }
+    renderUploads();
+    const fresh = await call(`/api/g/${ref}`);
+    if (fresh.status === 200) { upInfo = fresh.data; upMeta(); }
+  }
+  $("upPick").addEventListener("click", () => $("upInput").click());
+  $("upInput").addEventListener("change", (e) => { sendFiles([...e.target.files].filter((f) => f.size > 0)); e.target.value = ""; });
+  const upDrop = $("upDrop");
+  upDrop.addEventListener("dragover", (e) => { e.preventDefault(); upDrop.classList.add("over"); });
+  upDrop.addEventListener("dragleave", () => upDrop.classList.remove("over"));
+  upDrop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    upDrop.classList.remove("over");
+    sendFiles([...e.dataTransfer.files].filter((f) => f.size > 0));
+  });
+  window.addEventListener("beforeunload", (e) => {
+    if (uploads.some((u) => !u.done && !u.error)) { e.preventDefault(); e.returnValue = ""; }
+  });
 
   function open(newRef) {
     ref = newRef;

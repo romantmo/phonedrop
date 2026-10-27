@@ -14,8 +14,13 @@ services:
     image: ghcr.io/romantmo/phonedrop:${APP_TAG:-latest}
     restart: unless-stopped              # упало или сервер перезагрузился — запустить снова
     environment:
-      PUBLIC_URL: https://drop.rbgen.com # адрес сайта для QR-кода
+      PUBLIC_URL: https://drop.rbgen.com # адрес сайта для QR-кода и входа через Google
       VAPID_SUBJECT: https://drop.rbgen.com
+    # Секреты (ключ входа через Google, список разрешённых email) лежат ТОЛЬКО на сервере
+    # в файле /opt/phonedrop/.env (права 600). В GitHub и в коде их нет.
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - phonedrop-data:/data             # база и файлы живут отдельно от коробки
     security_opt:

@@ -95,6 +95,7 @@
       chat.setMessages(state.messages || []);
       if (state.pair) showPair(state.pair);
       else clearInterval(pairTimer);
+      $("pcGoogle").hidden = !(state.google && !state.linked);
       render();
       chat.connect();
       if (state.linked) { push.sync(ROLE, state.vapid_key); PDTransfers.refresh(); }
@@ -293,6 +294,12 @@
     toast("Компьютер отключён, всё удалено");
     start();
   });
+
+  // После входа через Google сервер возвращает сюда с ?login=ok или ?login_error=…
+  const q = new URLSearchParams(location.search);
+  if (q.get("login_error")) toast(q.get("login_error"), true);
+  else if (q.get("login") === "ok") toast("Вход выполнен — компьютер подключён ✅");
+  if (q.has("login") || q.has("login_error")) history.replaceState(null, "", "/");
 
   start();
 })();

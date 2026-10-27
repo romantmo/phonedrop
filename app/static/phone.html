@@ -35,13 +35,19 @@
       <button type="button" id="installBtn" hidden>📲 Установить приложение</button>
       <button type="button" id="menuScan">📷 Подключить компьютер</button>
       <button type="button" id="menuPush">🔔 Уведомления</button>
-      <a class="menu-link" href="/get">📥 Мне прислали код</a>
+      <button type="button" id="menuAccount" hidden></button>
+      <a class="menu-link" href="/get">🔑 У меня есть код</a>
       <a class="menu-link" href="/?desktop=1">💻 Открыть как компьютер</a>
     </nav>
 
     <div class="tabs" id="tabs" role="tablist" hidden>
       <button type="button" role="tab" id="tabChats" class="on" aria-selected="true">💻 Компьютеры</button>
       <button type="button" role="tab" id="tabTools" aria-selected="false">🛠 Инструменты</button>
+    </div>
+
+    <div class="banner" id="googleBanner" hidden>
+      <span>🔐 Привяжи Google — тогда чаты не потеряются при смене телефона, а входить можно без компьютера</span>
+      <a class="btn primary" href="/auth/google?role=phone">Привязать</a>
     </div>
 
     <div class="banner" id="pushBanner" hidden>
@@ -57,9 +63,10 @@
         <img class="logo-big" src="/static/icons/icon-192.png" alt="">
         <h2 id="gateTitle">Подключи компьютер</h2>
         <p id="gateText">Открой PhoneDrop на компьютере и отсканируй QR-код.</p>
+        <a class="btn primary block google-btn" id="gateGoogle" href="/auth/google?role=phone" hidden>Войти через Google</a>
         <button class="btn primary block" id="gateScan" type="button">📷 Сканировать QR-код</button>
         <button class="btn block" id="gateInstall" type="button" hidden>📲 Установить приложение</button>
-        <a class="btn block" href="/get">📥 Мне прислали код</a>
+        <a class="btn block" href="/get">🔑 У меня есть код</a>
         <p class="gate-tip" id="gateTip">Переустановил приложение или сменил телефон? На своём компьютере нажми <b>«📱 Переподключить телефон»</b> и отсканируй код — все чаты вернутся.</p>
       </div>
     </div>

@@ -283,3 +283,10 @@ a { color: var(--link); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* «Войти через Google» — светлая кнопка, как принято у Google */
+.btn.google-btn { background: #fff; color: #1f1f1f; border: 1px solid #dadce0; box-shadow: none; }
+.btn.google-btn::before {
+  content: "G"; display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--grad); color: #fff; font-weight: 800; font-size: 14px;
+}

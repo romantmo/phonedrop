@@ -38,6 +38,10 @@ jobs:
       - name: Запустить тесты
         run: pytest -v
 
+      - name: Проверить синтаксис JavaScript
+        # Ошибка в одном .js ломает всю страницу, а Python-тесты её не заметят.
+        run: for f in app/static/*.js; do node --check "$f"; done
+
   docker:
     name: Docker-образ
     needs: test        # начинается, только если автотесты прошли
