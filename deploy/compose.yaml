@@ -1,0 +1,40 @@
+# compose.yaml — инструкция для сервера: какие «коробки» запускать и как их соединить.
+# Запуск: docker compose up -d   (в папке /opt/phonedrop на сервере)
+#
+# Две коробки:
+#   app   — наше приложение PhoneDrop (берётся из хранилища GitHub);
+#   caddy — «привратник»: принимает посетителей из интернета, сам получает
+#           HTTPS-сертификат (замочек) и передаёт запросы приложению.
+
+services:
+  app:
+    image: ghcr.io/romantmo/phonedrop:latest
+    restart: unless-stopped              # упало или сервер перезагрузился — запустить снова
+    environment:
+      PUBLIC_URL: https://drop.rbgen.com # адрес сайта для QR-кода
+      VAPID_SUBJECT: https://drop.rbgen.com
+    volumes:
+      - phonedrop-data:/data             # база и файлы живут отдельно от коробки
+    security_opt:
+      - no-new-privileges:true           # приложению нельзя повышать себе права
+    cap_drop:
+      - ALL                              # и не нужны никакие особые права Linux
+    # Порт наружу НЕ открываем: снаружи приложение доступно только через Caddy.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"                          # нужен для получения сертификата и перенаправления на HTTPS
+      - "443:443"                        # HTTPS — сам сайт
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data                 # здесь хранится сертификат, чтобы не получать его заново
+      - caddy-config:/config
+    depends_on:
+      - app
+
+volumes:
+  phonedrop-data:
+  caddy-data:
+  caddy-config:
