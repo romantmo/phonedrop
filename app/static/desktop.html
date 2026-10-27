@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>PhoneDrop</title>
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/chat.css">
+<link rel="stylesheet" href="/static/desktop.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><img src="/static/icons/icon-192.png" alt="">PhoneDrop</div>
+
+    <section class="card pair" id="pairBox" hidden>
+      <div class="qr" id="qr"></div>
+      <h2>Отсканируй камерой телефона</h2>
+      <p>Код одноразовый — после сканирования он сгорает.</p>
+      <p class="expires" id="pairExpires"></p>
+    </section>
+
+    <section class="card">
+      <h2>Этот компьютер</h2>
+      <p class="device-name" id="deviceName">…</p>
+      <div class="choice" id="modeChoice">
+        <label>
+          <input type="radio" name="mode" value="temp" checked>
+          <div><b>🏢 Чужой компьютер</b><span>Переписка удалится через минуту после закрытия вкладки</span></div>
+        </label>
+        <label>
+          <input type="radio" name="mode" value="remember">
+          <div><b>🏠 Мой компьютер</b><span id="rememberHint">Запомнить его. Переписка сохраняется, файлы хранятся 30 дней</span></div>
+        </label>
+      </div>
+    </section>
+
+    <section class="card" id="pushBox" hidden>
+      <h2>🔔 Уведомления</h2>
+      <p id="pushText">Узнавай о сообщениях с телефона, даже когда вкладка свёрнута.</p>
+      <button class="btn primary block" id="pushBtn" type="button">Включить уведомления</button>
+    </section>
+
+    <section class="card note">
+      <p id="noteText"></p>
+    </section>
+
+    <div class="spacer"></div>
+    <button class="btn danger block" id="logoutBtn" type="button" hidden>Отключить компьютер и удалить переписку</button>
+  </aside>
+
+  <main class="chat" id="dropZone">
+    <header class="chat-head">
+      <div class="avatar">📱</div>
+      <div class="who">
+        <div class="name">Мой телефон</div>
+        <div class="status" id="peerStatus">не подключён</div>
+      </div>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="empty" id="empty">
+        <div class="big" id="emptyIcon">📷</div>
+        <b id="emptyTitle">Отсканируй QR-код слева</b>
+        <span id="emptyText">Наведи камеру телефона на код — и можно переписываться.</span>
+      </div>
+    </div>
+
+    <footer class="composer" id="composer" hidden>
+      <button class="icon-btn" id="attachBtn" type="button" aria-label="Прикрепить файл" title="Прикрепить файл">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5z"/></svg>
+      </button>
+      <input type="file" id="fileInput" multiple hidden>
+      <textarea id="msgInput" rows="1" placeholder="Сообщение на телефон" aria-label="Сообщение"></textarea>
+      <button class="round-btn" id="actionBtn" type="button" aria-label="Записать голосовое">
+        <svg class="i-mic" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+        <svg class="i-send" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 20.85 12.9a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>
+      </button>
+    </footer>
+    <footer class="composer recording" id="recBar" hidden>
+      <button class="icon-btn" id="recCancel" type="button" aria-label="Отменить запись" title="Отменить">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+      </button>
+      <div class="rec-info"><span class="rec-dot"></span><span id="recTime">0:00</span><span>Запись…</span></div>
+      <button class="round-btn" id="recSend" type="button" aria-label="Отправить голосовое">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 20.85 12.9a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>
+      </button>
+    </footer>
+
+    <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить на телефон</div>
+  </main>
+</div>
+<script src="/static/chat.js"></script>
+<script src="/static/desktop.js"></script>
+</body>
+</html>

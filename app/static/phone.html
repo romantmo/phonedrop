@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#2e4459">
+<meta name="referrer" content="no-referrer">
+<title>PhoneDrop</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/chat.css">
+<link rel="stylesheet" href="/static/phone.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ===== Список чатов ===== -->
+  <section class="view" id="listView">
+    <header class="chat-head">
+      <img class="logo" src="/static/icons/icon-192.png" alt="">
+      <div class="who">
+        <div class="name">PhoneDrop</div>
+        <div class="status">мои компьютеры</div>
+      </div>
+      <button class="icon-btn" id="listMenuBtn" type="button" aria-label="Меню">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+      </button>
+    </header>
+    <nav class="menu" id="listMenu" hidden>
+      <button type="button" id="installBtn" hidden>📲 Установить приложение</button>
+      <button type="button" id="menuScan">📷 Подключить компьютер</button>
+      <button type="button" id="menuPush">🔔 Уведомления</button>
+    </nav>
+
+    <div class="banner" id="pushBanner" hidden>
+      <span>🔔 Включи уведомления, чтобы не пропускать сообщения с компьютера</span>
+      <button class="btn primary" id="pushBannerBtn" type="button">Включить</button>
+    </div>
+
+    <div class="chat-list" id="chatList"></div>
+
+    <div class="gate" id="gate" hidden>
+      <div class="card">
+        <div class="big">🖥️</div>
+        <h2 id="gateTitle">Подключи компьютер</h2>
+        <p id="gateText">Открой PhoneDrop на компьютере и отсканируй QR-код.</p>
+        <button class="btn primary block" id="gateScan" type="button">📷 Сканировать QR-код</button>
+        <button class="btn block" id="gateInstall" type="button" hidden>📲 Установить приложение</button>
+      </div>
+    </div>
+
+    <button class="fab" id="fabScan" type="button" aria-label="Подключить компьютер" title="Подключить компьютер" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h7v7H3V3zm2 2v3h3V5H5zm9-2h7v7h-7V3zm2 2v3h3V5h-3zM3 14h7v7H3v-7zm2 2v3h3v-3H5zm9-2h2v2h-2v-2zm2 2h2v2h-2v-2zm2-2h3v2h-3v-2zm-4 4h2v3h-2v-3zm4 0h3v3h-2v-1h-1v-2z"/></svg>
+    </button>
+  </section>
+
+  <!-- ===== Открытый чат ===== -->
+  <section class="view" id="chatView" hidden>
+    <header class="chat-head">
+      <button class="icon-btn" id="backBtn" type="button" aria-label="Назад">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <div class="avatar">💻</div>
+      <div class="who">
+        <div class="name" id="pcName"></div>
+        <div class="status" id="pcStatus"></div>
+      </div>
+      <button class="icon-btn" id="chatMenuBtn" type="button" aria-label="Меню чата">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
+      </button>
+    </header>
+    <nav class="menu" id="chatMenu" hidden>
+      <button type="button" id="renameBtn">✏️ Переименовать компьютер</button>
+      <button type="button" class="danger" id="removeBtn">Отключить и удалить переписку</button>
+    </nav>
+
+    <div class="messages" id="messages">
+      <div class="empty" id="empty">
+        <div class="big">💬</div>
+        <b>Пока пусто</b>
+        Отправь фото, видео, файл, текст или голосовое — оно сразу появится на компьютере.
+      </div>
+    </div>
+
+    <footer class="composer" id="composer">
+      <button class="icon-btn" id="attachBtn" type="button" aria-label="Прикрепить файл">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5z"/></svg>
+      </button>
+      <input type="file" id="fileInput" multiple hidden>
+      <textarea id="msgInput" rows="1" placeholder="Сообщение" aria-label="Сообщение"></textarea>
+      <button class="round-btn" id="actionBtn" type="button" aria-label="Записать голосовое">
+        <svg class="i-mic" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+        <svg class="i-send" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 20.85 12.9a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>
+      </button>
+    </footer>
+    <footer class="composer recording" id="recBar" hidden>
+      <button class="icon-btn" id="recCancel" type="button" aria-label="Отменить запись">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+      </button>
+      <div class="rec-info"><span class="rec-dot"></span><span id="recTime">0:00</span><span>Запись…</span></div>
+      <button class="round-btn" id="recSend" type="button" aria-label="Отправить голосовое">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3.4 20.4 20.85 12.9a1 1 0 0 0 0-1.8L3.4 3.6a1 1 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>
+      </button>
+    </footer>
+    <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить</div>
+  </section>
+</div>
+
+<div id="scanner" hidden>
+  <video id="cam" playsinline muted></video>
+  <div class="frame"></div>
+  <div class="bar"><span>Наведи на QR-код на экране компьютера</span><button class="btn" id="scanClose" type="button">Закрыть</button></div>
+</div>
+
+<script src="/static/chat.js"></script>
+<script src="/static/phone.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "name": "PhoneDrop",
+  "short_name": "PhoneDrop",
+  "description": "Чат между телефоном и компьютером: текст, фото, видео, файлы и голосовые",
+  "lang": "ru",
+  "id": "/chat",
+  "start_url": "/chat",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#e8edf2",
+  "theme_color": "#2e4459",
+  "icons": [
+    { "src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/static/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        { "name": "files", "accept": ["*/*"] }
+      ]
+    }
+  }
+}
