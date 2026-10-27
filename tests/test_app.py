@@ -142,7 +142,8 @@ def test_healthz_shows_version(client, monkeypatch):
 
 
 def test_pages_load(client):
-    for path in ("/", "/chat", "/pair/whatever", "/sw.js", "/static/chat.js", "/static/icons/badge-96.png"):
+    for path in ("/", "/chat", "/pair/whatever", "/sw.js", "/static/chat.js", "/static/icons/badge-96.png",
+                 "/static/icons/icon.svg", "/static/icons/favicon-64.png"):
         assert client.get(path).status_code == 200, path
     assert client.get("/manifest.webmanifest").json()["share_target"]["action"] == "/share"
 
@@ -242,6 +243,20 @@ def test_rename_computer(pc, phone):
     r = phone.post(f"/api/chats/{chat_id}/rename", json={"name": "  Рабочий ноутбук\n "})
     assert r.json()["label"] == "Рабочий ноутбук"
     assert pc.get("/api/state").json()["device"]["label"] == "Рабочий ноутбук"
+
+
+def test_rename_from_computer_before_and_after_pairing(pc, phone):
+    open_pc(pc)
+    assert pc.post("/api/pc/rename", json={"name": "Рабочий ноутбук"}).json()["label"] == "Рабочий ноутбук"
+    chat_id = pair(pc, phone)  # имя, заданное до сканирования, сразу видно на телефоне
+    assert phone.get("/api/phone/chats").json()["chats"][0]["label"] == "Рабочий ноутбук"
+    with phone.ws() as ws_phone:
+        ws_phone.receive_json()  # presence
+        pc.post("/api/pc/rename", json={"name": "Домашний ПК"})
+        event = ws_phone.receive_json()
+        assert event == {"type": "renamed", "chat_id": chat_id, "label": "Домашний ПК"}
+    assert pc.post("/api/pc/rename", json={"name": "   "}).status_code == 400
+    assert phone.post("/api/pc/rename", json={"name": "x"}).status_code == 403
 
 
 def test_websocket_live_updates(client, pc, phone):

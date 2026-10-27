@@ -33,6 +33,17 @@
     $("gateInstall").hidden = !installEvent;
   }
 
+  // SVG-значок монитора берём из <template> в HTML (одинаково выглядит на всех телефонах).
+  const monitorIcon = () => $("icoMonitor").content.firstElementChild.cloneNode(true);
+
+  // Плавный переход между экранами: чат «въезжает» справа, список — обратно слева.
+  function animateView(id, direction) {
+    const view = $(id);
+    view.classList.remove("enter-forward", "enter-back");
+    void view.offsetWidth; // перезапуск анимации
+    view.classList.add(direction === "back" ? "enter-back" : "enter-forward");
+  }
+
   function modeText(c) {
     return c.mode === "remember" ? "🏠 мой компьютер" : "🏢 чужой — удалится после закрытия";
   }
@@ -53,7 +64,7 @@
     for (const c of chats) {
       const preview = c.last ? (c.last.sender === "phone" ? "Вы: " : "") + c.last.preview : modeText(c);
       list.append(el("button", { class: "chat-item", type: "button", onclick: () => openChat(c.id) },
-        el("div", { class: "avatar" }, "💻", c.pc_online ? el("span", { class: "online" }) : null),
+        el("div", { class: "avatar" }, monitorIcon(), c.pc_online ? el("span", { class: "online" }) : null),
         el("div", { class: "ci-main" },
           el("div", { class: "ci-row" },
             el("span", { class: "ci-name" }, c.label),
@@ -78,9 +89,11 @@
   }
 
   function showList(replace = false) {
+    const wasInChat = !$("chatView").hidden;
     openId = chat.chatId = null;
     $("chatView").hidden = true;
     $("listView").hidden = false;
+    if (wasInChat) animateView("listView", "back");
     if (replace) history.replaceState(null, "", "/chat");
     loadChats().catch((e) => e.status === 401 && showGate());
   }
@@ -105,6 +118,7 @@
     chat.setMessages(data.messages);
     $("listView").hidden = true;
     $("chatView").hidden = false;
+    animateView("chatView", "forward");
     if (pushHistory) history.pushState({ c: id }, "", `/chat?c=${id}`);
     markRead();
   }
@@ -241,13 +255,15 @@
     renderList();
   }
   $("pushBannerBtn").addEventListener("click", enablePush);
-  $("menuPush").addEventListener("click", () => {
+  function pushMenu() {
     const status = push.status();
     if (status === "granted") toast("Уведомления уже включены ✅");
     else if (status === "unsupported") toast("Этот браузер не поддерживает уведомления", true);
     else if (status === "denied") toast("Уведомления запрещены. Разреши их в настройках сайта в Chrome", true);
     else enablePush();
-  });
+  }
+  $("menuPush").addEventListener("click", pushMenu);
+  $("chatMenuPush").addEventListener("click", pushMenu);
 
   // ---------- сканер QR внутри приложения (Chrome на Android)
   let stream = null;

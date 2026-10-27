@@ -858,6 +858,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         set_pc_cookie(response, request, request.cookies.get(PC_COOKIE), mode)
         return response
 
+    @app.post("/api/pc/rename")
+    async def pc_rename(request: Request):
+        # Название можно задать ещё до сканирования QR — оно сразу появится на телефоне.
+        dev = require_pc(request, linked=False)
+        body = await request.json()
+        label = clean_label(body.get("name") if isinstance(body, dict) else "")
+        store.run("UPDATE devices SET label=? WHERE id=?", label, dev["id"])
+        if dev["account_id"]:
+            await store.to_chat(dev, {"type": "renamed", "chat_id": dev["id"], "label": label})
+        return {"label": label}
+
     @app.post("/api/pc/logout")
     async def pc_logout(request: Request):
         dev = require_pc(request, linked=False)

@@ -25,7 +25,10 @@
     $("pairBox").hidden = linked;
     $("composer").hidden = !linked;
     $("logoutBtn").hidden = !linked;
-    $("deviceName").textContent = state.device.label;
+    if (document.activeElement !== $("deviceName")) {
+      $("deviceName").value = state.device.label;
+      $("saveNameBtn").hidden = true;
+    }
     for (const radio of document.querySelectorAll("input[name=mode]")) radio.checked = radio.value === state.device.mode;
     $("rememberHint").textContent =
       `Запомнить его. Переписка сохраняется, файлы хранятся ${state.file_ttl_days} дней`;
@@ -118,6 +121,9 @@
     } else if (msg.type === "presence") {
       state.phone_online = msg.phone_online;
       render();
+    } else if (msg.type === "renamed") {
+      state.device.label = msg.label; // переименовали с телефона
+      render();
     }
   }
 
@@ -150,6 +156,34 @@
       render();
     });
   }
+
+  // ---------- название компьютера
+  const nameInput = $("deviceName");
+  nameInput.addEventListener("input", () => {
+    $("saveNameBtn").hidden = !nameInput.value.trim() || nameInput.value.trim() === state.device.label;
+  });
+  async function saveName() {
+    const name = nameInput.value.trim();
+    if (!name || name === state.device.label) return;
+    try {
+      const { label } = await api(ROLE, "/api/pc/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      state.device.label = label;
+      nameInput.blur();
+      toast("Название сохранено");
+    } catch (e) {
+      toast(e.message, true);
+    }
+    render();
+  }
+  $("saveNameBtn").addEventListener("click", saveName);
+  nameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveName(); });
+  nameInput.addEventListener("blur", () => setTimeout(() => {
+    if (document.activeElement !== $("saveNameBtn")) render();
+  }, 150));
 
   $("pushBtn").addEventListener("click", async () => {
     try {

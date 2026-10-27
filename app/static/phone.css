@@ -1,71 +1,91 @@
 /* Телефон: список компьютеров и чат на весь экран. */
 
-.app { height: 100dvh; position: relative; }
-.view { height: 100%; display: flex; flex-direction: column; position: relative; }
-#listView { background: var(--panel); }
+:root { --font: 18px; }   /* на телефоне шрифт на шаг крупнее */
 
-.chat-head .logo { width: 40px; height: 40px; border-radius: 10px; }
+/* Экран не «уезжает»: прокручиваются только список и лента сообщений, а не вся страница. */
+html, body { overflow: hidden; overscroll-behavior: none; }
+.app { position: fixed; inset: 0; overflow: hidden; }
+.view { position: absolute; inset: 0; display: flex; flex-direction: column; }
+#listView { background: var(--panel); }
+#chatView { background: var(--wall); }
+
+/* Плавные переходы между списком и чатом */
+.view.enter-forward { animation: slide-in .26s cubic-bezier(.2, .8, .2, 1) both; }
+.view.enter-back { animation: slide-back .26s cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes slide-in { from { transform: translateX(28%); opacity: 0; } }
+@keyframes slide-back { from { transform: translateX(-18%); opacity: .3; } }
+
+.chat-head .logo { width: 42px; height: 42px; border-radius: 12px; }
 .chat-head #backBtn { margin-left: -8px; }
 
 .menu {
-  position: absolute; top: 58px; right: 10px; z-index: 30;
-  min-width: 250px; padding: 6px 0;
-  background: var(--panel); border-radius: 14px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .22);
+  position: absolute; top: 62px; right: 10px; z-index: 30;
+  min-width: 260px; padding: 6px 0;
+  background: var(--panel); border-radius: 16px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, .28);
+  transform-origin: top right; animation: menu-in .16s ease-out both;
 }
+@keyframes menu-in { from { opacity: 0; transform: scale(.9); } }
 .menu button {
-  display: block; width: 100%; padding: 13px 18px;
+  display: block; width: 100%; padding: 14px 18px;
   border: 0; background: none; text-align: left; cursor: pointer; font-size: 17px;
 }
-.menu button:hover { background: var(--panel-2); }
+.menu button:active { background: var(--panel-2); }
 .menu .danger { color: var(--danger); }
 
 /* ---------- список чатов */
-.chat-list { flex: 1; overflow-y: auto; padding: 6px 0 96px; }
+.chat-list { flex: 1; overflow-y: auto; padding: 6px 0 110px; }
 .chat-item {
   display: flex; align-items: center; gap: 14px; width: 100%;
   padding: 12px 16px; border: 0; background: none; text-align: left; cursor: pointer;
+  animation: rise .3s ease both; transition: background .15s;
 }
+.chat-item:nth-child(2) { animation-delay: .04s; }
+.chat-item:nth-child(3) { animation-delay: .08s; }
 .chat-item:active { background: var(--panel-2); }
 .chat-item .avatar {
-  position: relative; width: 52px; height: 52px; flex-shrink: 0; border-radius: 50%;
-  display: grid; place-items: center; font-size: 26px; background: var(--accent-soft);
+  position: relative; width: 54px; height: 54px; flex-shrink: 0; border-radius: 50%;
+  display: grid; place-items: center; background: var(--grad); color: #fff;
 }
+.chat-item .avatar .ico { width: 28px; height: 28px; }
 .chat-item .online {
-  position: absolute; right: 1px; bottom: 1px; width: 13px; height: 13px; border-radius: 50%;
-  background: var(--online); border: 2px solid var(--panel);
+  position: absolute; right: 0; bottom: 0; width: 15px; height: 15px; border-radius: 50%;
+  background: var(--online); border: 3px solid var(--panel);
 }
 .ci-main { flex: 1; min-width: 0; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .ci-row { display: flex; align-items: center; gap: 8px; }
-.ci-name { flex: 1; font-weight: 700; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ci-name { flex: 1; font-weight: 700; font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ci-time { font-size: 13px; color: var(--muted); }
-.ci-preview { flex: 1; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ci-preview { flex: 1; color: var(--muted); font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ci-mode { font-size: 13px; color: var(--muted); margin-top: 2px; }
 .badge {
-  min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px;
-  display: grid; place-items: center; background: var(--accent); color: #fff; font-size: 13px; font-weight: 700;
+  min-width: 24px; height: 24px; padding: 0 7px; border-radius: 12px;
+  display: grid; place-items: center; background: var(--grad); color: #fff; font-size: 13px; font-weight: 700;
+  animation: badge .3s cubic-bezier(.2, .9, .3, 1.4) both;
 }
+@keyframes badge { from { transform: scale(0); } }
 .list-empty { margin-top: 40px; }
 
 .fab {
-  position: absolute; right: 18px; bottom: calc(22px + env(safe-area-inset-bottom)); z-index: 10;
-  width: 60px; height: 60px; border: 0; border-radius: 18px; cursor: pointer;
-  display: grid; place-items: center; background: var(--accent); color: #fff;
-  box-shadow: 0 6px 18px rgba(28, 40, 51, .28);
+  position: absolute; right: 18px; bottom: calc(24px + env(safe-area-inset-bottom)); z-index: 10;
+  width: 62px; height: 62px; border: 0; border-radius: 20px; cursor: pointer;
+  display: grid; place-items: center; background: var(--grad); color: #fff;
+  box-shadow: var(--glow);
+  animation: rise .35s ease both; transition: transform .12s ease;
 }
+.fab:active { transform: scale(.92); }
 .fab svg { width: 28px; height: 28px; }
 
 /* ---------- экран «нет подключения» */
 .gate { flex: 1; display: grid; place-items: center; padding: 24px; background: var(--wall); }
 .gate .card {
   max-width: 420px; padding: 28px 22px; text-align: center;
-  background: var(--panel); border-radius: 18px; box-shadow: var(--shadow);
+  background: var(--panel); border-radius: 20px; box-shadow: var(--shadow);
+  animation: rise .35s ease both;
 }
-.gate .big { font-size: 48px; }
+.gate .logo-big { width: 84px; height: 84px; border-radius: 22px; box-shadow: var(--glow); }
 .gate p { color: var(--muted); }
 .gate .btn { margin-top: 10px; }
-
-#chatView { background: var(--wall); }
 
 /* ---------- сканер */
 #scanner { position: fixed; inset: 0; z-index: 60; background: #000; display: flex; flex-direction: column; }
@@ -75,6 +95,6 @@
   position: absolute; top: 45%; left: 50%;
   width: 64vw; height: 64vw; max-width: 320px; max-height: 320px;
   transform: translate(-50%, -50%);
-  border: 3px solid #fff; border-radius: 20px;
-  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .45); pointer-events: none;
+  border: 3px solid var(--teal); border-radius: 22px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .5); pointer-events: none;
 }

@@ -4,8 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#283246">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1a2130">
 <title>PhoneDrop</title>
-<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icons/favicon-64.png" sizes="64x64">
 <link rel="stylesheet" href="/static/chat.css">
 <link rel="stylesheet" href="/static/desktop.css">
 </head>
@@ -23,7 +27,11 @@
 
     <section class="card">
       <h2>Этот компьютер</h2>
-      <p class="device-name" id="deviceName">…</p>
+      <div class="name-row">
+        <input id="deviceName" maxlength="40" autocomplete="off" aria-label="Название компьютера" placeholder="Например: Рабочий ноутбук">
+        <button class="btn" id="saveNameBtn" type="button" hidden>Сохранить</button>
+      </div>
+      <p class="hint">Так компьютер будет называться на телефоне</p>
       <div class="choice" id="modeChoice">
         <label>
           <input type="radio" name="mode" value="temp" checked>
@@ -52,7 +60,7 @@
 
   <main class="chat" id="dropZone">
     <header class="chat-head">
-      <div class="avatar">📱</div>
+      <div class="avatar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
       <div class="who">
         <div class="name">Мой телефон</div>
         <div class="status" id="peerStatus">не подключён</div>

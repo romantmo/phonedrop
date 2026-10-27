@@ -17,22 +17,38 @@
   padding: 16px; overflow-y: auto;
   background: var(--panel); border-right: 1px solid var(--line);
 }
-.brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 800; }
-.brand img { width: 34px; height: 34px; border-radius: 8px; }
+.brand { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 800; }
+.brand img { width: 36px; height: 36px; border-radius: 10px; box-shadow: var(--glow); }
 
-.card { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
+.card {
+  padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel-2);
+  animation: rise .3s ease both;
+}
 .card h2 { font-size: 18px; margin: 0 0 6px; }
 .card p { margin: 0; color: var(--muted); font-size: 15px; }
 
 .pair { text-align: center; }
-.qr { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 12px; aspect-ratio: 1; }
+.qr { position: relative; background: #fff; border-radius: 14px; padding: 14px; margin-bottom: 12px; aspect-ratio: 1; }
+/* градиентная рамка вокруг QR */
+.qr::before {
+  content: ""; position: absolute; inset: -3px; border-radius: 17px; z-index: -1; background: var(--grad);
+}
+.pair { position: relative; z-index: 0; }
 .qr svg { width: 100%; height: 100%; display: block; }
 .qr path { fill: #000; }
 .expires { margin-top: 10px !important; font-size: 14px !important; }
-.pair .btn { margin-top: 12px; }
 
-.devices { display: flex; flex-direction: column; gap: 10px; }
-.devices .row { font-weight: 600; }
+/* название компьютера */
+.name-row { display: flex; gap: 8px; margin: 6px 0 12px; }
+.name-row input {
+  flex: 1; min-width: 0; min-height: 42px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink);
+  font: inherit; font-size: 16px; font-weight: 600;
+  transition: border-color .2s, box-shadow .2s;
+}
+.name-row input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.name-row .btn { min-height: 42px; padding: 0 14px; }
+.hint { font-size: 13px !important; margin-top: -6px !important; margin-bottom: 12px !important; }
 
 .note p + p { margin-top: 8px; }
 .side .spacer { flex: 1; }
@@ -45,6 +61,3 @@
   .qr { max-width: 260px; margin: 0 auto 12px; }
   .chat { height: 100vh; }
 }
-
-.device-name { font-weight: 600; color: var(--ink) !important; margin-bottom: 12px !important; }
-.card h2 + .device-name { margin-top: -2px !important; }

@@ -3,11 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#2e4459">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#283246">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1a2130">
 <meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
 <title>PhoneDrop</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="icon" href="/static/icons/icon-192.png">
+<link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icons/favicon-64.png" sizes="64x64">
 <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 <link rel="stylesheet" href="/static/chat.css">
 <link rel="stylesheet" href="/static/phone.css">
@@ -42,7 +45,7 @@
 
     <div class="gate" id="gate" hidden>
       <div class="card">
-        <div class="big">🖥️</div>
+        <img class="logo-big" src="/static/icons/icon-192.png" alt="">
         <h2 id="gateTitle">Подключи компьютер</h2>
         <p id="gateText">Открой PhoneDrop на компьютере и отсканируй QR-код.</p>
         <button class="btn primary block" id="gateScan" type="button">📷 Сканировать QR-код</button>
@@ -61,7 +64,7 @@
       <button class="icon-btn" id="backBtn" type="button" aria-label="Назад">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
       </button>
-      <div class="avatar">💻</div>
+      <div class="avatar"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="12.5" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 20.5h7M12 16.5v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
       <div class="who">
         <div class="name" id="pcName"></div>
         <div class="status" id="pcStatus"></div>
@@ -72,6 +75,7 @@
     </header>
     <nav class="menu" id="chatMenu" hidden>
       <button type="button" id="renameBtn">✏️ Переименовать компьютер</button>
+      <button type="button" id="chatMenuPush">🔔 Уведомления</button>
       <button type="button" class="danger" id="removeBtn">Отключить и удалить переписку</button>
     </nav>
 
@@ -106,6 +110,8 @@
     <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить</div>
   </section>
 </div>
+
+<template id="icoMonitor"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="12.5" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 20.5h7M12 16.5v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></template>
 
 <div id="scanner" hidden>
   <video id="cam" playsinline muted></video>
