@@ -14,7 +14,7 @@ window.PDTools = (() => {
     {
       id: "scan", op: "scan", icon: "📷", title: "Сканер документов",
       sub: "Фото страниц → ровный PDF",
-      hint: "Сфотографируй страницы или выбери фото из галереи. Лист найдётся сам — нажми на страницу, чтобы поправить уголки.",
+      hint: "Сфотографируй страницы — лист найдётся сам. Нажми на страницу, чтобы поправить.",
       camera: true, scanner: true, accept: IMAGE_ACCEPT, multi: true, arrange: true, rotate: true, min: 1,
       action: "Сделать PDF",
     },
@@ -52,7 +52,6 @@ window.PDTools = (() => {
   let option = null;
   let busy = false;
   let uploading = 0;   // сколько фото сейчас загружается (сканер)
-  let refreshTimer = null;
 
   const ext = (name) => (name.includes(".") ? name.split(".").pop() : "file").slice(0, 4);
   const isImage = (f) => f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name);
@@ -89,23 +88,23 @@ window.PDTools = (() => {
     $("toolSub").textContent = tool.sub;
     $("toolHint").textContent = tool.hint;
     $("toolCamera").hidden = !tool.camera;
-    $("toolPick").textContent = tool.camera ? "🖼 Из галереи" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
+    $("toolPick").textContent = tool.camera ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
     const pick = $("toolPickInput");
     pick.accept = tool.accept;
     pick.multiple = tool.multi;
     $("toolRun").textContent = tool.action;
     $("scanSettings").hidden = !tool.scanner;
-    if (tool.scanner) PDScanner.renderSettings($("scanSettings"), onScanSettings);
+    if (tool.scanner) renderScanSettings();
     renderOptions();
     render();
   }
 
-  // Поменяли режим/контраст/резкость — обновляем превью страниц (с небольшой паузой).
-  function onScanSettings(key) {
-    staleResults();
-    if (!["mode", "contrast", "sharpness"].includes(key)) return;
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(render, 250);
+  function renderScanSettings() {
+    PDScanner.renderSettings($("scanSettings"), () => staleResults(), () => {
+      const first = items.findIndex((it) => !it.uploading);
+      if (first < 0) return toast("Сначала добавь страницу", true);
+      editPage(first, "look");
+    });
   }
 
   function renderOptions() {
@@ -165,11 +164,14 @@ window.PDTools = (() => {
     }
   }
 
-  async function editPage(i) {
+  // Редактор страниц: обрезка и вид (режим, контраст, резкость) с большим превью.
+  async function editPage(i, tab = "crop") {
     const item = items[i];
     if (!item || item.uploading) return;
-    const changed = await PDScanner.openEditor(item, i, items.length);
-    if (changed) { staleResults(); render(); }
+    await PDScanner.openEditor(items, i, tab);
+    staleResults();
+    renderScanSettings();
+    render();
   }
 
   function staleResults() {
@@ -254,8 +256,7 @@ window.PDTools = (() => {
     if (!items.length) {
       list.append(el("div", { class: "tf-empty" }, tool.camera ? "Пока нет страниц" : "Файл ещё не выбран"));
     }
-    if (tool.camera && items.length) $("toolCamera").textContent = "📷 Ещё страница";
-    else if (tool.camera) $("toolCamera").textContent = "📷 Снять страницу";
+    if (tool.camera) $("toolCamera").textContent = "📷 Камера";
     const run = $("toolRun");
     run.disabled = busy || uploading > 0 || items.length < tool.min;
     run.textContent = busy ? "Обрабатываю…" : items.length && items.length < tool.min

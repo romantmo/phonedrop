@@ -158,18 +158,22 @@
 
 <template id="icoMonitor"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="12.5" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 20.5h7M12 16.5v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></template>
 
-<!-- ===== Редактор страницы сканера: уголки, поворот, превью ===== -->
+<!-- ===== Редактор страниц сканера: обрезка и вид (большое превью) ===== -->
 <div class="scan-editor" id="scanEditor" hidden>
   <header class="chat-head">
     <button class="icon-btn" id="edBack" type="button" aria-label="Готово">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
     </button>
-    <div class="who"><div class="name" id="edTitle">Страница</div><div class="status" id="edSub">Перетащи уголки к краям листа</div></div>
+    <div class="ed-nav">
+      <button class="icon-btn" id="edPrev" type="button" aria-label="Предыдущая страница">‹</button>
+      <div class="name" id="edTitle">1 / 1</div>
+      <button class="icon-btn" id="edNext" type="button" aria-label="Следующая страница">›</button>
+    </div>
     <button class="btn primary ed-done" id="edDone" type="button">Готово</button>
   </header>
   <div class="ed-tabs seg">
-    <button type="button" id="edTabCrop" class="on">✂️ Обрезка</button>
-    <button type="button" id="edTabResult">👁 Результат</button>
+    <button type="button" id="edTabCrop">✂️ Обрезка</button>
+    <button type="button" id="edTabLook">🎨 Вид</button>
   </div>
   <div class="ed-stage" id="edStage">
     <div class="crop-box" id="cropBox">
@@ -179,14 +183,16 @@
         <polygon id="cropPoly"/>
       </svg>
     </div>
-    <img class="ed-result" id="edResult" alt="Результат" hidden>
-    <div class="ed-loading" id="edLoading" hidden>Обрабатываю…</div>
+    <img class="ed-result" id="edResult" alt="Так страница будет выглядеть в PDF" hidden>
+    <span class="ed-spin" id="edLoading" hidden></span>
+    <span class="ed-badge" id="edBadge" hidden>Удерживай — покажу «до»</span>
   </div>
-  <footer class="ed-tools">
+  <footer class="ed-tools" id="edCropTools">
     <button class="btn" id="edAuto" type="button">✨ Авто</button>
     <button class="btn" id="edFull" type="button">Весь кадр</button>
     <button class="btn" id="edRotate" type="button">⟳ Поворот</button>
   </footer>
+  <footer class="ed-look" id="edLookTools" hidden></footer>
 </div>
 
 <div id="scanner" hidden>
