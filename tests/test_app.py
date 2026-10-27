@@ -1177,3 +1177,13 @@ def test_guest_pages_are_public_and_safe(client):
         assert r.status_code == 200 and "<script>" not in r.text
         assert "script-src 'self'" in r.headers["content-security-policy"]
         assert r.headers["referrer-policy"] == "no-referrer"  # ключ из ссылки не утечёт на другие сайты
+
+
+def test_phone_opening_main_page_goes_to_phone_app(client):
+    android = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"
+    tablet = "Mozilla/5.0 (Linux; Android 14; SM-X710) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+    r = client.get("/", headers={"User-Agent": android}, follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/chat"
+    assert client.get("/?desktop=1", headers={"User-Agent": android}).status_code == 200  # вручную — можно
+    assert client.get("/", headers={"User-Agent": tablet}, follow_redirects=False).status_code == 200
+    assert client.get("/", headers={"User-Agent": WIN_UA}, follow_redirects=False).status_code == 200

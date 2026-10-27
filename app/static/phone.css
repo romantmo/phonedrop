@@ -107,3 +107,7 @@ html, body { overflow: hidden; overscroll-behavior: none; }
   transition: background .2s, color .2s, border-color .2s;
 }
 .tabs button.on { background: var(--grad); color: #fff; border-color: transparent; box-shadow: var(--glow); }
+.menu .menu-link {
+  display: block; padding: 14px 18px; color: var(--ink); text-decoration: none; font-size: 17px;
+}
+.menu .menu-link:active { background: var(--panel-2); }

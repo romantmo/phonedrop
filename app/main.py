@@ -1220,8 +1220,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------ страницы
 
+    def is_phone(user_agent: str) -> bool:
+        ua = user_agent or ""
+        return ("Android" in ua and "Mobile" in ua) or "iPhone" in ua
+
     @app.get("/", include_in_schema=False)
-    async def desktop_page():
+    async def desktop_page(request: Request, desktop: int = 0):
+        # С телефона главная страница сразу ведёт в приложение для телефона.
+        # Планшеты (без слова Mobile) остаются «компьютером». ?desktop=1 — открыть страницу компьютера вручную.
+        if not desktop and is_phone(request.headers.get("user-agent", "")):
+            return RedirectResponse("/chat", status_code=302)
         return FileResponse(STATIC_DIR / "desktop.html")
 
     @app.get("/chat", include_in_schema=False)
