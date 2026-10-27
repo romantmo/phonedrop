@@ -1,0 +1,14 @@
+# Что НЕ класть в «коробку»: лишнее, секреты и локальные данные.
+.git
+.github
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+tests
+data
+*.db
+*.db-*
+*.pem
+.env
+*.md
