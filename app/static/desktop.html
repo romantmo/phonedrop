@@ -23,6 +23,7 @@
       <h2>Отсканируй камерой телефона</h2>
       <p>Код одноразовый — после сканирования он сгорает.</p>
       <p class="expires" id="pairExpires"></p>
+      <p class="pair-tip">Уже переписывался с этим компьютером, но вход слетел? На телефоне открой его чат → ⋮ → <b>«Переподключить компьютер»</b> — переписка вернётся.</p>
     </section>
 
     <section class="card">
@@ -53,6 +54,8 @@
     <section class="card note">
       <p id="noteText"></p>
     </section>
+
+    <button class="btn block" id="relinkBtn" type="button" hidden>📱 Переподключить телефон</button>
 
     <div class="spacer"></div>
     <button class="btn danger block" id="logoutBtn" type="button" hidden>Отключить компьютер и удалить переписку</button>
@@ -98,6 +101,16 @@
 
     <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить на телефон</div>
   </main>
+</div>
+<div class="modal" id="relinkModal" hidden>
+  <div class="modal-card pair">
+    <h2>📱 Переподключить телефон</h2>
+    <div class="qr" id="relinkQr"></div>
+    <p>Отсканируй этот код <b>новым</b> телефоном (или после переустановки приложения). Все чаты вернутся на него.</p>
+    <p class="warn">⚠️ Старый телефон будет отключён от твоих чатов.</p>
+    <p class="expires" id="relinkExpires"></p>
+    <button class="btn block" id="relinkClose" type="button">Закрыть</button>
+  </div>
 </div>
 <script src="/static/chat.js"></script>
 <script src="/static/desktop.js"></script>

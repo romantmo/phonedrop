@@ -179,7 +179,7 @@ a { color: var(--link); }
 .bubble audio { display: block; width: 280px; max-width: 100%; margin: 4px 0; }
 .voice-label { font-size: 15px; color: var(--muted); }
 
-.caption { font-size: 14px; color: var(--muted); word-break: break-all; }
+.caption { font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
 .file-row {
   display: flex; align-items: center; gap: 12px; min-width: 220px; padding: 6px 8px; margin: 0 -8px;
   border-radius: 12px; color: inherit; text-decoration: none; cursor: pointer; transition: background .15s;
@@ -192,7 +192,7 @@ a { color: var(--link); }
   display: grid; place-items: center;
   background: var(--grad); color: #fff; font-size: 12px; font-weight: 800; text-transform: uppercase;
 }
-.file-row .fname { font-weight: 600; word-break: break-all; }
+.file-row .fname { font-weight: 600; overflow-wrap: anywhere; }  /* переносим по пробелам, рвём слово только если иначе не влезает */
 .file-row .fsize { font-size: 14px; color: var(--muted); }
 
 .meta {
@@ -201,7 +201,7 @@ a { color: var(--link); }
 }
 .tick { color: var(--tick); font-weight: 700; letter-spacing: -3px; padding-right: 3px; }
 
-.actions { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
+.actions { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 16px; }
 .actions button, .actions a {
   padding: 2px 0; border: 0; background: none; cursor: pointer;
   color: var(--action); font-size: 15px; font-weight: 700; text-decoration: none;

@@ -25,6 +25,7 @@
     $("pairBox").hidden = linked;
     $("composer").hidden = !linked;
     $("logoutBtn").hidden = !linked;
+    $("relinkBtn").hidden = !(linked && remember);
     if (document.activeElement !== $("deviceName")) {
       $("deviceName").value = state.device.label;
       $("saveNameBtn").hidden = true;
@@ -118,6 +119,9 @@
     if (msg.type === "linked") {
       toast("Телефон подключён");
       start();
+    } else if (msg.type === "relinked") {
+      closeRelink();
+      toast("Телефон переподключён — все чаты на нём");
     } else if (msg.type === "presence") {
       state.phone_online = msg.phone_online;
       render();
@@ -133,6 +137,8 @@
     const texts = {
       phone_removed: "Телефон отключил этот компьютер — переписка удалена",
       expired: "Компьютер долго не использовался и был отключён",
+      reattached: "Готово — переписка восстановлена",
+      moved: "Этот чат открыли в другом браузере — здесь он отключён",
     };
     if (texts[reason]) toast(texts[reason]);
     start();
@@ -194,6 +200,38 @@
     }
     renderPush();
   });
+
+  // ---------- «Переподключить телефон» (телефон переустановили или сменили)
+  let relinkTimer = null;
+  function closeRelink() {
+    clearInterval(relinkTimer);
+    $("relinkModal").hidden = true;
+    $("relinkQr").replaceChildren();
+  }
+  $("relinkBtn").addEventListener("click", async () => {
+    let pair;
+    try {
+      ({ pair } = await api(ROLE, "/api/pc/relink", { method: "POST" }));
+    } catch (e) {
+      return toast(e.message, true);
+    }
+    // SVG-код QR сгенерирован нашим же сервером из нашей ссылки — пользовательских данных в нём нет.
+    $("relinkQr").innerHTML = pair.qr_svg;
+    $("relinkModal").hidden = false;
+    const until = Date.now() + pair.expires_in * 1000;
+    const tick = () => {
+      const left = Math.max(0, Math.round((until - Date.now()) / 1000));
+      $("relinkExpires").textContent = left
+        ? `Код действует ещё ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`
+        : "Код истёк — закрой и нажми кнопку ещё раз";
+      if (!left) clearInterval(relinkTimer);
+    };
+    clearInterval(relinkTimer);
+    tick();
+    relinkTimer = setInterval(tick, 1000);
+  });
+  $("relinkClose").addEventListener("click", closeRelink);
+  $("relinkModal").addEventListener("click", (e) => { if (e.target === $("relinkModal")) closeRelink(); });
 
   $("logoutBtn").addEventListener("click", async () => {
     if (!confirm("Отключить этот компьютер? Переписка с телефоном и файлы удалятся с сервера.")) return;

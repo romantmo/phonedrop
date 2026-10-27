@@ -61,3 +61,20 @@
   .qr { max-width: 260px; margin: 0 auto 12px; }
   .chat { height: 100vh; }
 }
+
+/* ---------- переподключение */
+.pair-tip { margin-top: 12px !important; font-size: 13px !important; text-align: left; }
+#relinkBtn { margin-top: 4px; }
+.modal {
+  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px;
+  background: rgba(10, 14, 22, .6); animation: fade .2s ease both;
+}
+@keyframes fade { from { opacity: 0; } }
+.modal-card {
+  width: min(380px, 100%); padding: 22px; border-radius: 22px; background: var(--panel);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .35); animation: rise .25s ease both;
+}
+.modal-card h2 { margin: 0 0 14px; font-size: 20px; }
+.modal-card p { margin: 8px 0 0; color: var(--muted); font-size: 15px; }
+.modal-card .warn { color: var(--danger); }
+.modal-card .btn { margin-top: 16px; }

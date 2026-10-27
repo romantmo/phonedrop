@@ -16,7 +16,10 @@
     role: ROLE,
     enterSends: false, // на телефоне Enter — новая строка, отправка кнопкой
     onEvent,
-    onClosed: () => showGate(),
+    onClosed: (reason) => reason === "relinked"
+      ? showGate("Чаты открыты на другом телефоне",
+        "Если это был не ты — на своём компьютере нажми «📱 Переподключить телефон» и отсканируй код этим телефоном.")
+      : showGate(),
     onResync: async () => { await loadChats(); if (openId) openChat(openId, false); },
     onConnection: (ok) => { if (!ok && openId) $("pcStatus").textContent = "нет связи с сервером…"; },
   });
@@ -206,8 +209,9 @@
     if (match) {
       history.replaceState(null, "", "/chat");
       try {
-        target = (await api(ROLE, `/api/pair/${match[1]}`, { method: "POST" })).chat_id;
-        toast("Компьютер подключён");
+        const res = await api(ROLE, `/api/pair/${match[1]}`, { method: "POST" });
+        target = res.chat_id;
+        toast(res.relinked ? "Телефон переподключён — все чаты на месте" : "Компьютер подключён");
       } catch (e) {
         try { await loadChats(); } catch { /* аккаунта ещё нет */ }
         if (chats.length) { toast(e.message, true); chat.connect(); return; }
@@ -275,6 +279,25 @@
     }
   });
 
+  // «Переподключить компьютер»: на компьютере слетел вход и он показывает новый QR.
+  // Сканируем его — и этот браузер получает старый чат со всей перепиской.
+  $("reattachBtn").addEventListener("click", () => {
+    const chatId = openId;
+    toast("Открой PhoneDrop на компьютере и наведи камеру на QR-код");
+    openScanner(async (code) => {
+      try {
+        const { label } = await api(ROLE, `/api/chats/${chatId}/reattach`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
+        });
+        toast(`«${label}» переподключён — переписка на месте`);
+        await loadChats();
+        if (openId === chatId) openChat(chatId, false);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+
   $("removeBtn").addEventListener("click", async () => {
     if (!confirm("Отключить этот компьютер? Переписка и файлы удалятся с сервера.")) return;
     try {
@@ -308,9 +331,12 @@
 
   // ---------- сканер QR внутри приложения (Chrome на Android)
   let stream = null;
-  async function openScanner() {
+  // onPair(код) — что делать с найденным кодом. Без него — обычное подключение нового компьютера.
+  async function openScanner(onPair) {
     if (!("BarcodeDetector" in window)) {
-      toast("Сканер недоступен в этом браузере — наведи обычную камеру телефона на QR-код", true);
+      toast(typeof onPair === "function"
+        ? "В этом браузере нет сканера QR — открой PhoneDrop в Chrome"
+        : "Сканер недоступен в этом браузере — наведи обычную камеру телефона на QR-код", true);
       return;
     }
     try {
@@ -332,7 +358,8 @@
           // Принимаем только коды нашего же сайта.
           if (url.origin === location.origin && url.pathname.startsWith("/pair/")) {
             closeScanner();
-            location.href = url.href;
+            if (typeof onPair === "function") onPair(url.pathname.slice("/pair/".length));
+            else location.href = url.href;
             return;
           }
         }
@@ -346,7 +373,7 @@
     stream = null;
     $("scanner").hidden = true;
   }
-  for (const id of ["gateScan", "menuScan", "fabScan"]) $(id).addEventListener("click", openScanner);
+  for (const id of ["gateScan", "menuScan", "fabScan"]) $(id).addEventListener("click", () => openScanner());
   $("scanClose").addEventListener("click", closeScanner);
 
   // ---------- установка как приложение (PWA)

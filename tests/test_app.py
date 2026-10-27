@@ -852,3 +852,87 @@ def test_scanner_rejects_non_photos(pc, phone):
     r = phone.post("/api/scan/pages", files={"files": ("broken.jpg", b"not a photo", "image/jpeg")})
     assert r.status_code == 422
     assert not list(store(phone.client).tools_root.glob("scan-*"))  # ничего не осталось на диске
+
+
+# ----------------------------------------------- переподключение телефона
+
+def remember(pc: Device):
+    assert pc.post("/api/pc/mode", json={"mode": "remember"}).status_code == 200
+
+
+def test_relink_after_phone_reinstall(client, pc, phone):
+    chat_id = pair(pc, phone)
+    remember(pc)
+    send_text(phone, "до переустановки", chat_id)
+    old_sub = {"endpoint": "https://push.example/old", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+    phone.post("/api/push/subscribe", json=old_sub)
+
+    new_phone = Device(client, "phone")  # переустановили приложение — cookie нет
+    assert new_phone.get("/api/phone/chats").status_code == 401
+    r = pc.post("/api/pc/relink")
+    assert r.status_code == 200
+    code = r.json()["pair"]["url"].rsplit("/", 1)[1]
+    with pc.ws() as ws_pc:
+        r = new_phone.post(f"/api/pair/{code}")
+        assert r.status_code == 200 and r.json() == {"chat_id": chat_id, "relinked": True}
+        types = [ws_pc.receive_json()["type"] for _ in range(2)]  # сначала «присутствие», потом событие
+        assert "relinked" in types
+    # все чаты и переписка на месте
+    chats = new_phone.get("/api/phone/chats").json()["chats"]
+    assert [c["id"] for c in chats] == [chat_id]
+    assert new_phone.get(f"/api/chats/{chat_id}").json()["messages"][0]["text"] == "до переустановки"
+    # старый ключ больше не работает, старая подписка получила предупреждение и удалена
+    assert phone.get("/api/phone/chats").status_code == 401
+    client.portal.call(store(client).flush_push)
+    assert "другом телефоне" in dict(client.pusher.sent)["https://push.example/old"]
+    assert store(client).one("SELECT COUNT(*) AS n FROM push_subs")["n"] == 0
+    # код одноразовый
+    assert Device(client, "phone").post(f"/api/pair/{code}").status_code == 410
+
+
+def test_relink_only_from_my_computer(client, pc, phone):
+    pair(pc, phone)  # режим «чужой» по умолчанию
+    assert pc.post("/api/pc/relink").status_code == 403
+    assert Device(client, "pc").post("/api/pc/relink").status_code == 401  # не подключённый компьютер
+
+
+def test_relink_merges_new_phone_computers(client, pc, phone):
+    home = pair(pc, phone)
+    remember(pc)
+    new_phone = Device(client, "phone")
+    work_pc = Device(client, "pc")
+    work = pair(work_pc, new_phone)  # на новом телефоне уже успели подключить другой компьютер
+    code = pc.post("/api/pc/relink").json()["pair"]["url"].rsplit("/", 1)[1]
+    assert new_phone.post(f"/api/pair/{code}").json()["relinked"] is True
+    ids = {c["id"] for c in new_phone.get("/api/phone/chats").json()["chats"]}
+    assert ids == {home, work}
+    assert store(client).one("SELECT COUNT(*) AS n FROM accounts")["n"] == 1
+
+
+def test_relink_code_useless_after_switch_to_temp(client, pc, phone):
+    pair(pc, phone)
+    remember(pc)
+    code = pc.post("/api/pc/relink").json()["pair"]["url"].rsplit("/", 1)[1]
+    pc.post("/api/pc/mode", json={"mode": "temp"})
+    assert Device(client, "phone").post(f"/api/pair/{code}").status_code == 403
+
+
+def test_phone_reattaches_computer_that_lost_login(client, pc, phone):
+    chat_id = pair(pc, phone)
+    remember(pc)
+    send_text(phone, "важная переписка", chat_id)
+    # на компьютере почистили cookie — браузер стал «новым» и показывает новый QR
+    fresh_pc = Device(client, "pc")
+    code = code_of(open_pc(fresh_pc))
+    r = phone.post(f"/api/chats/{chat_id}/reattach", json={"code": code})
+    assert r.status_code == 200, r.text
+    state = fresh_pc.get("/api/state").json()
+    assert state["chat_id"] == chat_id and state["device"]["mode"] == "remember"
+    assert [m["text"] for m in state["messages"]] == ["важная переписка"]
+    assert pc.get("/api/state").status_code == 401  # старый вход больше не действует
+    assert len(phone.get("/api/phone/chats").json()["chats"]) == 1  # нового пустого чата нет
+    # чужой телефон так сделать не может, и код одноразовый
+    stranger = Device(client, "phone")
+    pair(Device(client, "pc"), stranger)
+    assert stranger.post(f"/api/chats/{chat_id}/reattach", json={"code": code}).status_code == 404
+    assert phone.post(f"/api/chats/{chat_id}/reattach", json={"code": code}).status_code == 410

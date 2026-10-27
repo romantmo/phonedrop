@@ -335,10 +335,13 @@ class Store:
         return code, expires
 
     def consume_pair_code(self, code: str, phone_token: str | None):
-        """Одноразовый код из QR: после подключения он перестаёт работать."""
-        dev = self.one("SELECT * FROM devices WHERE pair_hash=?", token_hash(code))
-        if not dev or dev["account_id"] or time.time() > dev["pair_expires"]:
+        """Одноразовый код из QR: после подключения он перестаёт работать.
+        Возвращает (компьютер, аккаунт, новый ключ телефона или None, старые push-подписки или None)."""
+        dev = self.one("SELECT * FROM devices WHERE pair_hash=?", token_hash(code)) if code else None
+        if not dev or time.time() > dev["pair_expires"]:
             raise HTTPException(410, "Код недействителен или уже использован. Обнови страницу на компьютере")
+        if dev["account_id"]:
+            return self.relink_phone(dev, phone_token)
         now = time.time()
         account = self.account_by_token(phone_token)
         new_token = None
@@ -359,7 +362,50 @@ class Store:
         if not changed:
             raise HTTPException(410, "Код уже использован")
         self.run("UPDATE accounts SET last_active=? WHERE id=?", now, account["id"])
-        return self.device(dev["id"]), account, new_token
+        return self.device(dev["id"]), account, new_token, None
+
+    def reattach_pc(self, chat: sqlite3.Row, code: str) -> tuple[sqlite3.Row, sqlite3.Row]:
+        """«Переподключить компьютер» с телефона: браузер компьютера потерял вход
+        (почистили cookie, другой браузер) и показывает новый QR. Телефон сканирует его,
+        и этот браузер получает СТАРЫЙ чат со всей перепиской — новый пустой чат не создаётся.
+        Возвращает (новое «пустое» устройство, которое исчезает; чат, который получил новый ключ)."""
+        fresh = self.one("SELECT * FROM devices WHERE pair_hash=?", token_hash(code)) if code else None
+        if not fresh or fresh["account_id"] or time.time() > fresh["pair_expires"]:
+            raise HTTPException(410, "Код недействителен. Обнови страницу на компьютере и отсканируй новый QR")
+        # Ключ браузера переносим на старый чат; старый ключ (если где-то остался) перестаёт работать.
+        self.run("DELETE FROM devices WHERE id=?", fresh["id"])
+        self.run("UPDATE devices SET token_hash=?, last_seen=? WHERE id=?", fresh["token_hash"], time.time(), chat["id"])
+        return fresh, self.device(chat["id"])
+
+    def relink_phone(self, dev: sqlite3.Row, phone_token: str | None):
+        """Переподключение телефона через «свой» компьютер (телефон переустановили или сбросили).
+
+        Телефон получает НОВЫЙ ключ от аккаунта этого компьютера — старый ключ перестаёт работать,
+        поэтому у аккаунта всегда только один телефон. Если на новом телефоне уже были свои
+        компьютеры, они переезжают в этот аккаунт — ничего не теряется."""
+        if dev["mode"] != "remember":
+            raise HTTPException(403, "Переподключать телефон можно только через «Мой компьютер»")
+        now = time.time()
+        target = self.one("SELECT * FROM accounts WHERE id=?", dev["account_id"])
+        current = self.account_by_token(phone_token)
+        self.run("UPDATE devices SET pair_hash=NULL, pair_expires=0 WHERE id=?", dev["id"])
+        if current and current["id"] == target["id"]:
+            return dev, target, None, None  # это и так тот же телефон
+        if current:
+            total = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id IN (?,?)",
+                             target["id"], current["id"])["n"]
+            if total > MAX_DEVICES:
+                raise HTTPException(409, f"Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные")
+        old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
+        self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{target['id']}")  # старый телефон больше не получает
+        new_token = secrets.token_urlsafe(32)
+        self.run("UPDATE accounts SET token_hash=?, last_active=? WHERE id=?", token_hash(new_token), now, target["id"])
+        if current:
+            self.run("UPDATE devices SET account_id=? WHERE account_id=?", target["id"], current["id"])
+            self.run("UPDATE push_subs SET owner=? WHERE owner=?", f"acc:{target['id']}", f"acc:{current['id']}")
+            self.delete_owner_tools(f"acc:{current['id']}")
+            self.run("DELETE FROM accounts WHERE id=?", current["id"])
+        return dev, self.one("SELECT * FROM accounts WHERE id=?", target["id"]), new_token, old_subs
 
     def delete_device(self, device_id: str) -> None:
         self.run("DELETE FROM push_subs WHERE owner=?", f"dev:{device_id}")
@@ -1084,6 +1130,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "Компьютер уже подключён")
         return {"pair": pc_state(request, dev, store.new_pair_code(dev["id"]))["pair"]}
 
+    @app.post("/api/pc/relink")
+    async def pc_relink(request: Request):
+        """«Переподключить телефон»: QR-код для нового (переустановленного) телефона."""
+        dev = require_pc(request)
+        if dev["mode"] != "remember":
+            raise HTTPException(403, "Переподключать телефон можно только через «Мой компьютер»")
+        limiter.hit(f"relink:{dev['id']}", 10, 600)
+        return {"pair": pc_state(request, dev, store.new_pair_code(dev["id"]))["pair"]}
+
     @app.post("/api/pc/mode")
     async def pc_mode(request: Request):
         dev = require_pc(request, linked=False)
@@ -1129,10 +1184,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def pair(code: str, request: Request):
         role_of(request, "phone")
         limiter.hit(f"pair:{client_ip(request)}", 30, 600)
-        dev, acc, new_token = store.consume_pair_code(code, request.cookies.get(PHONE_COOKIE))
-        await store.send_ws(store.pc_sockets.get(dev["id"], set()), {"type": "linked"})
+        old = store.account_by_token(request.cookies.get(PHONE_COOKIE))
+        dev, acc, new_token, old_subs = store.consume_pair_code(code, request.cookies.get(PHONE_COOKIE))
+        relinked = old_subs is not None
+        if relinked:
+            # Старый телефон: закрываем его соединения и предупреждаем последним уведомлением.
+            for key in {acc["id"], old["id"] if old else None} - {None}:
+                for ws in list(store.phone_sockets.pop(key, set())):
+                    try:
+                        await ws.send_json({"type": "closed", "reason": "relinked"})
+                        await ws.close(code=4000)
+                    except Exception:
+                        pass
+            for sub in old_subs:
+                task = asyncio.create_task(store._push_one(sub, {
+                    "title": "PhoneDrop", "url": "/chat", "tag": "relinked",
+                    "body": "Твои чаты открыты на другом телефоне. Если это был не ты — переподключи телефон через свой компьютер."}))
+                store.push_tasks.add(task)
+                task.add_done_callback(store.push_tasks.discard)
+            await store.send_ws(store.pc_sockets.get(dev["id"], set()), {"type": "relinked"})
+            for d in store.q("SELECT * FROM devices WHERE account_id=?", acc["id"]):
+                await store.presence(d)
+        else:
+            await store.send_ws(store.pc_sockets.get(dev["id"], set()), {"type": "linked"})
         await store.send_ws(store.phone_sockets.get(acc["id"], set()), {"type": "chats_changed", "chat_id": dev["id"]})
-        response = JSONResponse({"chat_id": dev["id"]})
+        response = JSONResponse({"chat_id": dev["id"], "relinked": relinked})
         if new_token:
             set_phone_cookie(response, request, new_token)
         return response
@@ -1163,6 +1239,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store.run("UPDATE devices SET label=? WHERE id=?", label, dev["id"])
         await store.to_chat(dev, {"type": "renamed", "chat_id": dev["id"], "label": label})
         return {"label": label}
+
+    @app.post("/api/chats/{chat_id}/reattach")
+    async def phone_reattach_pc(chat_id: str, request: Request):
+        acc = require_phone(request)
+        dev = phone_chat(acc, chat_id)
+        limiter.hit(f"pair:{client_ip(request)}", 30, 600)
+        body = await request.json()
+        code = body.get("code") if isinstance(body, dict) else None
+        old_sockets = store.pc_sockets.pop(dev["id"], set())
+        fresh, dev = store.reattach_pc(dev, code if isinstance(code, str) else "")
+        # Старый браузер (если он ещё открыт) отключаем, новый — перезагружает переписку.
+        for ws in list(old_sockets):
+            try:
+                await ws.send_json({"type": "closed", "reason": "moved"})
+                await ws.close(code=4000)
+            except Exception:
+                pass
+        for ws in list(store.pc_sockets.pop(fresh["id"], set())):
+            try:
+                await ws.send_json({"type": "closed", "reason": "reattached"})
+                await ws.close(code=4000)
+            except Exception:
+                pass
+        store.run("DELETE FROM push_subs WHERE owner=?", f"dev:{dev['id']}")  # уведомления — заново в новом браузере
+        await store.presence(dev)
+        return {"chat_id": dev["id"], "label": dev["label"]}
 
     @app.delete("/api/chats/{chat_id}")
     async def phone_remove_chat(chat_id: str, request: Request):

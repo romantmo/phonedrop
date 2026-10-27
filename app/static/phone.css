@@ -365,3 +365,4 @@ html, body { overflow: hidden; overscroll-behavior: none; }
 .ed-slider input { flex: 1; accent-color: #a78bfa; height: 30px; }
 .ed-note { margin: 6px 0 0; font-size: 12px; color: rgba(255, 255, 255, .5); text-align: center; }
 .crop-box img, .ed-result { max-height: calc(100dvh - 300px); }
+.gate-tip { margin: 16px 0 0; font-size: 14px; color: var(--muted); }
