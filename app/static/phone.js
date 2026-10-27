@@ -144,10 +144,11 @@
 
   function openTool(id, pushHistory = true) {
     if (!PDTools.open(id)) return showList(true);
+    const already = !$("toolView").hidden;  // например, вернулись из редактора страницы
     openId = chat.chatId = null;
     $("listView").hidden = $("chatView").hidden = true;
     $("toolView").hidden = false;
-    animateView("toolView", "forward");
+    if (!already) animateView("toolView", "forward");
     if (pushHistory) history.pushState({ t: id }, "", `/chat?t=${id}`);
   }
   $("toolBack").addEventListener("click", () => {

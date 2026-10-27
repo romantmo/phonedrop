@@ -5,6 +5,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -136,3 +137,87 @@ def test_http_api(tmp_path):
     r = client.post("/convert/merge-pdf", files=[("files", ("a.pdf", b"broken", "application/pdf"))] * 2)
     assert r.status_code == 422 and "PDF" in r.json()["detail"]
     assert client.post("/convert/format-disk").status_code == 404
+
+
+# ------------------------------------------------------------------ сканер 2.0
+
+def photo_of_page(path: Path, size=(1200, 1600)) -> Path:
+    """«Фото листа на столе»: тёмный стол, светлый лист под углом, строки текста."""
+    import cv2
+    import numpy as np
+
+    w, h = size
+    page = np.full((1100, 780, 3), 235, np.uint8)
+    for i in range(14):
+        cv2.line(page, (60, 90 + i * 65), (60 + 500 + (i * 37) % 160, 90 + i * 65), (40, 40, 40), 9)
+    src = np.float32([[0, 0], [779, 0], [779, 1099], [0, 1099]])
+    dst = np.float32([[0.18 * w, 0.12 * h], [0.86 * w, 0.16 * h], [0.92 * w, 0.88 * h], [0.10 * w, 0.84 * h]])
+    desk = np.full((h, w, 3), (90, 70, 55), np.uint8)
+    warped = cv2.warpPerspective(page, cv2.getPerspectiveTransform(src, dst), (w, h))
+    mask = cv2.warpPerspective(np.full(page.shape[:2], 255, np.uint8), cv2.getPerspectiveTransform(src, dst), (w, h))
+    desk[mask > 0] = warped[mask > 0]
+    Image.fromarray(desk).save(path, quality=90)
+    return path
+
+
+def test_scanner_finds_page_corners(tmp_path):
+    from converter import scan
+
+    rgb = scan.to_array(Image.open(photo_of_page(tmp_path / "p.jpg")))
+    corners = scan.detect_corners(rgb)
+    expected = [[0.18, 0.12], [0.86, 0.16], [0.92, 0.88], [0.10, 0.84]]
+    for (x, y), (ex, ey) in zip(corners, expected):
+        assert abs(x - ex) < 0.03 and abs(y - ey) < 0.03, corners
+
+
+def test_scanner_modes(tmp_path):
+    from converter import scan
+
+    rgb = scan.to_array(Image.open(photo_of_page(tmp_path / "p.jpg")))
+    corners = scan.detect_corners(rgb)
+    flat = scan.process(rgb, corners, 0, "doc", 2, 1)
+    h, w = flat.shape
+    assert 1.15 < h / w < 1.55  # лист выровнен: снова «портретный» прямоугольник
+    assert flat[h // 2, 20] > 200  # бумага стала белой, стола нет
+    bw = scan.process(rgb, corners, 90, "bw", 2, 1)
+    assert set(np.unique(bw)) <= {0, 255} and bw.shape[1] > bw.shape[0]  # ч/б и повёрнут
+    color = scan.process(rgb, None, 0, "color", 2, 1)
+    assert color.shape == rgb.shape
+    assert scan.valid_corners([[0, 0], [1, 0], [1, 1]]) is None
+    assert scan.valid_corners([[0, 0], [2, 0], [1, 1], [0, 1]]) is None
+
+
+def test_scan_pdf_page_size_and_weight(tmp_path):
+    photo = photo_of_page(tmp_path / "p.jpg")
+    page = {"corners": [[0.18, 0.12], [0.86, 0.16], [0.92, 0.88], [0.10, 0.84]], "mode": "doc"}
+    sizes = {}
+    for page_size, weight in (("a4", "light"), ("a4", "max"), ("letter", "normal"), ("auto", "normal")):
+        d = tmp_path / f"{page_size}-{weight}"
+        d.mkdir()
+        (out,) = ops.scan_to_pdf([photo], d, [page], page_size, weight)
+        box = PdfReader(out).pages[0].mediabox
+        sizes[(page_size, weight)] = (round(float(box.width)), round(float(box.height)), out.stat().st_size)
+    assert sizes[("a4", "light")][:2] == (595, 842)
+    assert sizes[("letter", "normal")][:2] == (612, 792)
+    assert sizes[("a4", "light")][2] < sizes[("a4", "max")][2]  # «лёгкий» правда легче
+    assert sizes[("auto", "normal")][1] == 842
+
+
+def test_scan_pdf_black_and_white_is_tiny(tmp_path):
+    photo = photo_of_page(tmp_path / "p.jpg")
+    (gray,) = ops.scan_to_pdf([photo], tmp_path, [{"mode": "doc"}], "a4", "max")
+    gray_size = gray.stat().st_size
+    (bw,) = ops.scan_to_pdf([photo], tmp_path, [{"mode": "bw"}], "a4", "max")
+    assert bw.stat().st_size < gray_size / 3
+
+
+def test_scan_http(tmp_path):
+    client = TestClient(app)
+    photo = photo_of_page(tmp_path / "p.jpg").read_bytes()
+    r = client.post("/scan/prepare", files={"files": ("p.jpg", photo, "image/jpeg")})
+    info = r.json()
+    assert len(info["corners"]) == 4 and (info["width"], info["height"]) == (1200, 1600)
+    r = client.post("/scan/render", data={"params": '{"mode": "bw", "size": 400}'},
+                    files={"files": ("p.jpg", photo, "image/jpeg")})
+    assert r.headers["content-type"] == "image/jpeg"
+    assert max(Image.open(io.BytesIO(r.content)).size) == 400

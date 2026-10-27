@@ -12,11 +12,10 @@ window.PDTools = (() => {
 
   const TOOLS = [
     {
-      id: "scan", op: "images-pdf", icon: "📷", title: "Сканер документов",
-      sub: "Фото страниц → один PDF",
-      hint: "Сфотографируй страницы по очереди или выбери фото из галереи. Порядок и поворот можно поменять.",
-      camera: true, accept: IMAGE_ACCEPT, multi: true, arrange: true, rotate: true, min: 1,
-      options: { key: "mode", def: "doc", choices: [["doc", "📄 Документ (ч/б)"], ["color", "🎨 Цвет"]] },
+      id: "scan", op: "scan", icon: "📷", title: "Сканер документов",
+      sub: "Фото страниц → ровный PDF",
+      hint: "Сфотографируй страницы или выбери фото из галереи. Лист найдётся сам — нажми на страницу, чтобы поправить уголки.",
+      camera: true, scanner: true, accept: IMAGE_ACCEPT, multi: true, arrange: true, rotate: true, min: 1,
       action: "Сделать PDF",
     },
     {
@@ -52,6 +51,8 @@ window.PDTools = (() => {
   let results = [];
   let option = null;
   let busy = false;
+  let uploading = 0;   // сколько фото сейчас загружается (сканер)
+  let refreshTimer = null;
 
   const ext = (name) => (name.includes(".") ? name.split(".").pop() : "file").slice(0, 4);
   const isImage = (f) => f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name);
@@ -93,8 +94,18 @@ window.PDTools = (() => {
     pick.accept = tool.accept;
     pick.multiple = tool.multi;
     $("toolRun").textContent = tool.action;
+    $("scanSettings").hidden = !tool.scanner;
+    if (tool.scanner) PDScanner.renderSettings($("scanSettings"), onScanSettings);
     renderOptions();
     render();
+  }
+
+  // Поменяли режим/контраст/резкость — обновляем превью страниц (с небольшой паузой).
+  function onScanSettings(key) {
+    staleResults();
+    if (!["mode", "contrast", "sharpness"].includes(key)) return;
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(render, 250);
   }
 
   function renderOptions() {
@@ -113,6 +124,7 @@ window.PDTools = (() => {
       toast("Здесь можно использовать только фото", true);
       files = files.filter(isImage);
     }
+    if (tool.scanner) return uploadScan(files);
     if (!tool.multi) {
       items.forEach((i) => i.preview && URL.revokeObjectURL(i.preview));
       items = [];
@@ -124,6 +136,40 @@ window.PDTools = (() => {
     }
     staleResults();
     render();
+  }
+
+  // Сканер: каждое фото сразу загружается на сервер (пачками до 20).
+  async function uploadScan(files) {
+    files = files.slice(0, Math.max(0, MAX_FILES - items.length));
+    for (let start = 0; start < files.length; start += 20) {
+      const batch = files.slice(start, start + 20);
+      const holders = batch.map((f) => ({ uploading: true, name: f.name || "фото", progress: 0 }));
+      items.push(...holders);
+      uploading += batch.length;
+      staleResults();
+      render();
+      try {
+        const pages = await PDScanner.upload(batch, (p) => {
+          holders.forEach((h) => (h.progress = p));
+          document.querySelectorAll(".page-card.loading .page-status").forEach((n) => (n.textContent =
+            p < 1 ? `Загрузка ${Math.round(p * 100)}%` : "Ищу лист на фото…"));
+        });
+        holders.forEach((h, i) => Object.assign(h, pages[i], { uploading: false }));
+      } catch (e) {
+        toast(e.message, true);
+        items = items.filter((it) => !holders.includes(it));
+      } finally {
+        uploading -= batch.length;
+        render();
+      }
+    }
+  }
+
+  async function editPage(i) {
+    const item = items[i];
+    if (!item || item.uploading) return;
+    const changed = await PDScanner.openEditor(item, i, items.length);
+    if (changed) { staleResults(); render(); }
   }
 
   function staleResults() {
@@ -139,8 +185,18 @@ window.PDTools = (() => {
     render();
   }
 
-  function thumb(item) {
+  function thumb(item, i) {
     const box = el("div", { class: "tf-thumb" });
+    if (tool.scanner) {
+      if (item.uploading) {
+        box.append(el("span", { class: "tf-spinner" }));
+      } else {
+        box.classList.add("editable");
+        box.addEventListener("click", () => editPage(i));
+        box.append(el("img", { src: PDScanner.previewUrl(item, 240), alt: "", loading: "lazy" }));
+      }
+      return box;
+    }
     if (item.preview) {
       const img = el("img", { src: item.preview, alt: "", class: "rot-" + item.rot });
       // HEIC браузер показать не умеет — тогда просто значок.
@@ -152,12 +208,40 @@ window.PDTools = (() => {
     return box;
   }
 
+  function removeItem(i) {
+    const item = items[i];
+    if (item.preview) URL.revokeObjectURL(item.preview);
+    items.splice(i, 1);
+    staleResults();
+    render();
+  }
+
+  // Сканер: страницы — плитками 2 в ряд, как в приложениях-сканерах.
+  function pageCard(item, i) {
+    const busyItem = item.uploading;
+    return el("div", { class: "page-card" + (busyItem ? " loading" : "") },
+      el("button", { type: "button", class: "page-thumb", disabled: busyItem, "aria-label": `Обрезать страницу ${i + 1}`,
+        onclick: () => editPage(i) },
+        busyItem ? el("span", { class: "tf-spinner" })
+          : el("img", { src: PDScanner.previewUrl(item, 360), alt: "", loading: "lazy" }),
+        el("span", { class: "page-num" }, String(i + 1)),
+        busyItem ? el("span", { class: "page-status" }, "Загрузка…")
+          : el("span", { class: "page-status" }, "✂️ Обрезать")),
+      el("div", { class: "page-ctrl" },
+        el("button", { type: "button", "aria-label": "Повернуть", disabled: busyItem,
+          onclick: () => { item.rot = (item.rot + 90) % 360; staleResults(); render(); } }, "⟳"),
+        el("button", { type: "button", "aria-label": "Раньше", disabled: i === 0, onclick: () => move(i, -1) }, "←"),
+        el("button", { type: "button", "aria-label": "Позже", disabled: i === items.length - 1, onclick: () => move(i, 1) }, "→"),
+        el("button", { type: "button", class: "del", "aria-label": "Убрать", onclick: () => removeItem(i) }, "✕")));
+  }
+
   function render() {
     const list = $("toolFiles");
-    list.replaceChildren(...items.map((item, i) =>
+    list.classList.toggle("pages", !!tool.scanner && items.length > 0);
+    list.replaceChildren(...items.map((item, i) => tool.scanner ? pageCard(item, i) :
       el("div", { class: "tf-item" },
         tool.arrange ? el("span", { class: "tf-num" }, String(i + 1)) : null,
-        thumb(item),
+        thumb(item, i),
         el("div", { class: "tf-info" },
           el("div", { class: "tf-name" }, item.file.name),
           el("div", { class: "tf-size" }, fmtSize(item.file.size))),
@@ -166,19 +250,14 @@ window.PDTools = (() => {
             onclick: () => { item.rot = (item.rot + 90) % 360; staleResults(); render(); } }, "⟳") : null,
           tool.arrange && i > 0 ? el("button", { type: "button", "aria-label": "Выше", onclick: () => move(i, -1) }, "↑") : null,
           tool.arrange && i < items.length - 1 ? el("button", { type: "button", "aria-label": "Ниже", onclick: () => move(i, 1) }, "↓") : null,
-          el("button", { type: "button", class: "del", "aria-label": "Убрать", onclick: () => {
-            if (item.preview) URL.revokeObjectURL(item.preview);
-            items.splice(i, 1);
-            staleResults();
-            render();
-          } }, "✕")))));
+          el("button", { type: "button", class: "del", "aria-label": "Убрать", onclick: () => removeItem(i) }, "✕")))));
     if (!items.length) {
       list.append(el("div", { class: "tf-empty" }, tool.camera ? "Пока нет страниц" : "Файл ещё не выбран"));
     }
     if (tool.camera && items.length) $("toolCamera").textContent = "📷 Ещё страница";
     else if (tool.camera) $("toolCamera").textContent = "📷 Снять страницу";
     const run = $("toolRun");
-    run.disabled = busy || items.length < tool.min;
+    run.disabled = busy || uploading > 0 || items.length < tool.min;
     run.textContent = busy ? "Обрабатываю…" : items.length && items.length < tool.min
       ? `Нужно ещё ${tool.min - items.length}` : tool.action;
   }
@@ -190,8 +269,31 @@ window.PDTools = (() => {
     return `Скан ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}`;
   }
 
+  async function runScan() {
+    busy = true;
+    staleResults();
+    render();
+    const bar = $("toolProgress");
+    bar.hidden = false;
+    bar.classList.add("working");
+    $("toolRun").textContent = "Собираю PDF…";
+    try {
+      const data = await PDScanner.makePdf(items, scanName());
+      results = data.results;
+      showResults(data.ttl_min);
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      busy = false;
+      bar.hidden = true;
+      bar.classList.remove("working");
+      render();
+    }
+  }
+
   function run() {
-    if (busy || items.length < tool.min) return;
+    if (busy || uploading || items.length < tool.min) return;
+    if (tool.scanner) return runScan();
     const fd = new FormData();
     for (const item of items) fd.append("files", item.file, item.file.name);
     if (tool.options) fd.append(tool.options.key, option);

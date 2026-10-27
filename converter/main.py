@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import base64
 import io
+import json
 import shutil
 import tempfile
 import zipfile
@@ -62,6 +64,12 @@ def _run(op: str, inputs: list[tuple[Path, str]], form: dict, out_dir: Path) -> 
         except ValueError:
             rotations = []
         return ops.images_to_pdf(paths, out_dir, rotations, "doc" if form.get("mode") == "doc" else "color")
+    if op == "scan-pdf":
+        try:
+            pages = json.loads(form.get("pages") or "[]")
+        except ValueError:
+            pages = []
+        return ops.scan_to_pdf(paths, out_dir, pages, form.get("page_size", "auto"), form.get("weight", "normal"))
     if op == "merge-pdf":
         return ops.merge_pdfs(paths, out_dir)
     if op == "pdf-images":
@@ -95,3 +103,52 @@ async def convert(op: str, request: Request):
     finally:
         await form.close()
     return Response(buf.getvalue(), media_type="application/zip")
+
+
+# ---------------------------------------------------------------- сканер
+
+
+async def _one_file(request: Request, work: Path) -> tuple[Path, dict]:
+    form = await request.form(max_files=1, max_fields=5)
+    try:
+        files = [v for v in form.getlist("files") if isinstance(v, UploadFile)]
+        if len(files) != 1:
+            raise HTTPException(400, "Нужен ровно один файл")
+        (path, _), = await run_in_threadpool(_save, files, work)
+        try:
+            params = json.loads(form.get("params") or "{}")
+        except ValueError:
+            params = {}
+        return path, params
+    finally:
+        await form.close()
+
+
+@app.post("/scan/prepare")
+async def scan_prepare(request: Request):
+    """Новая страница: уголки листа + уменьшенная копия для превью."""
+    with tempfile.TemporaryDirectory(prefix="pdscan-") as tmp:
+        path, _ = await _one_file(request, Path(tmp))
+        try:
+            info = await run_in_threadpool(ops.scan_prepare, path, Path(tmp))
+        except ops.ConvertError as exc:
+            raise HTTPException(422, str(exc))
+        work = base64.b64encode(info.pop("work").read_bytes()).decode()
+    return {**info, "work": work}
+
+
+@app.post("/scan/render")
+async def scan_render(request: Request):
+    """Превью страницы с выбранными уголками и настройками."""
+    with tempfile.TemporaryDirectory(prefix="pdscan-") as tmp:
+        path, params = await _one_file(request, Path(tmp))
+        try:
+            size = min(max(int(params.get("size", 900)), 200), 1400)
+        except (TypeError, ValueError):
+            size = 900
+        try:
+            out = await run_in_threadpool(ops.scan_render, path, Path(tmp), params, size)
+        except ops.ConvertError as exc:
+            raise HTTPException(422, str(exc))
+        data = out.read_bytes()
+    return Response(data, media_type="image/jpeg")

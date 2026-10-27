@@ -20,6 +20,8 @@ from PIL import Image, ImageFilter, ImageOps
 from pillow_heif import register_heif_opener
 from pypdf import PdfReader, PdfWriter
 
+from . import scan
+
 register_heif_opener()  # учим Pillow открывать HEIC/HEIF (фото с iPhone и некоторых Android)
 
 # Защита от «бомб»: крошечный файл, который при распаковке становится картинкой на миллиарды
@@ -107,6 +109,94 @@ def images_to_pdf(paths: list[Path], out_dir: Path, rotations: list[int] | None 
     # Подбираем «разрешение» так, чтобы длинная сторона страницы была как у A4 (29,7 см).
     resolution = max(max(p.size) for p in pages) / 11.69
     pages[0].save(out, "PDF", save_all=True, append_images=pages[1:], resolution=resolution, quality=85)
+    return [out]
+
+
+# ------------------------------------------------------------------- сканер 2.0
+
+
+def _page_params(raw: dict | None) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    mode = raw.get("mode") if raw.get("mode") in scan.MODES else "doc"
+
+    def num(key, default):
+        try:
+            return int(raw.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "corners": scan.valid_corners(raw.get("corners")) if raw.get("corners") else None,
+        "rot": num("rot", 0) % 360,
+        "mode": mode,
+        "contrast": num("contrast", 2),
+        "sharpness": num("sharpness", 1),
+    }
+
+
+def scan_prepare(path: Path, out_dir: Path, max_side: int = 1400) -> dict:
+    """Новая страница: находим лист и делаем уменьшенную «рабочую» копию для превью."""
+    rgb = scan.to_array(_open_image(path))
+    corners = scan.detect_corners(rgb)
+    work = out_dir / "work.jpg"
+    scan.to_image(scan.fit(rgb, max_side)).save(work, "JPEG", quality=85)
+    h, w = rgb.shape[:2]
+    return {"corners": corners, "width": w, "height": h, "work": work}
+
+
+def scan_render(path: Path, out_dir: Path, params: dict | None, max_side: int = 900) -> Path:
+    """Превью одной страницы с уголками, режимом, контрастом и резкостью."""
+    p = _page_params(params)
+    rgb = scan.fit(scan.to_array(_open_image(path)), 1400)
+    arr = scan.fit(scan.process(rgb, p["corners"], p["rot"], p["mode"], p["contrast"], p["sharpness"]), max_side)
+    out = out_dir / "preview.jpg"
+    scan.to_image(arr).save(out, "JPEG", quality=80)
+    return out
+
+
+def _place_on_page(img: Image.Image, page_size: str, max_side: int) -> tuple[Image.Image, float]:
+    """Кладёт страницу на лист нужного формата. Возвращает картинку и её «dpi» для PDF."""
+    if page_size not in scan.PAGE_SIZES:  # «как на фото»: лист по пропорциям снимка, длинная сторона как у A4
+        k = max_side / max(img.size)  # у всех страниц одинаковая длинная сторона → одинаковый «dpi»
+        img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))), Image.Resampling.LANCZOS)
+        return img, max_side / (scan.PAGE_SIZES["a4"][1] / 72)
+    pw, ph = scan.PAGE_SIZES[page_size]
+    if img.width > img.height:
+        pw, ph = ph, pw  # широкая страница — лист кладём горизонтально
+    dpi = max_side / (max(pw, ph) / 72)
+    canvas_w, canvas_h = round(pw / 72 * dpi), round(ph / 72 * dpi)
+    img = img.copy()
+    img.thumbnail((canvas_w, canvas_h), Image.Resampling.LANCZOS)
+    canvas = Image.new(img.mode, (canvas_w, canvas_h), 255 if img.mode in ("1", "L") else "white")
+    canvas.paste(img, ((canvas_w - img.width) // 2, (canvas_h - img.height) // 2))
+    return canvas, dpi
+
+
+def scan_to_pdf(paths: list[Path], out_dir: Path, pages: list | None = None,
+                page_size: str = "auto", weight: str = "normal") -> list[Path]:
+    if not paths:
+        raise ConvertError("Добавь хотя бы одну страницу")
+    if len(paths) > MAX_PAGES_IN:
+        raise ConvertError(f"Слишком много страниц (максимум {MAX_PAGES_IN})")
+    pages = pages if isinstance(pages, list) else []
+    max_side, quality = scan.WEIGHTS.get(weight, scan.WEIGHTS["normal"])
+    out = out_dir / "result.pdf"
+    writer = PdfWriter()
+    for i, path in enumerate(paths):
+        p = _page_params(pages[i] if i < len(pages) else None)
+        arr = scan.process(scan.to_array(_open_image(path)), p["corners"], p["rot"],
+                           p["mode"], p["contrast"], p["sharpness"])
+        img, dpi = _place_on_page(scan.to_image(arr), page_size, max_side)
+        del arr
+        if p["mode"] == "bw":
+            img = img.convert("1", dither=Image.Dither.NONE)  # 1 бит на точку: в PDF сжимается как факс
+        # Каждую страницу сразу сохраняем в отдельный PDF — в памяти держим только одну страницу.
+        page_pdf = out_dir / f"page-{i:03d}.pdf"
+        extra = {} if img.mode == "1" else {"quality": quality}  # для ч/б «качество JPEG» не применяется
+        img.save(page_pdf, "PDF", resolution=dpi, **extra)
+        writer.append(PdfReader(page_pdf))
+    with out.open("wb") as f:
+        writer.write(f)
     return [out]
 
 

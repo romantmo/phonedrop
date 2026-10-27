@@ -8,6 +8,7 @@
 import time
 
 import io
+import json
 import shutil
 import zipfile
 from pathlib import Path
@@ -794,3 +795,60 @@ def test_office_tool_on_phone(pc, phone):
     r = phone.post("/api/tools/office-pdf", files={"files": ("Отчёт.xlsx", xlsx, "application/octet-stream")})
     assert r.status_code == 200, r.text
     assert r.json()["results"][0]["name"] == "Отчёт.pdf"
+
+
+# ------------------------------------------------------------------ сканер 2.0
+
+def scan_photo(tmp_path) -> bytes:
+    from test_converter import photo_of_page
+
+    return photo_of_page(tmp_path / "page.jpg").read_bytes()
+
+
+def test_scanner_v2_flow(client, pc, phone, tmp_path):
+    pair(pc, phone)
+    photo = scan_photo(tmp_path)
+    r = phone.post("/api/scan/pages", files=[("files", ("p1.jpg", photo, "image/jpeg")),
+                                             ("files", ("p2.jpg", photo, "image/jpeg"))])
+    assert r.status_code == 200, r.text
+    pages = r.json()["pages"]
+    assert len(pages) == 2 and len(pages[0]["corners"]) == 4
+    # рабочая копия и превью — обычные картинки по ссылке (для <img>)
+    work = phone.get(pages[0]["image_url"])
+    assert work.headers["content-type"] == "image/jpeg"
+    params = json.dumps({"corners": pages[0]["corners"], "mode": "bw", "contrast": 3, "size": 300})
+    prev = phone.get(f"/s/{pages[0]['id']}/preview", params={"p": params})
+    assert prev.status_code == 200 and max(Image.open(io.BytesIO(prev.content)).size) == 300
+    # итоговый PDF: A4, лёгкий
+    r = phone.post("/api/scan/pdf", json={
+        "pages": [{"id": p["id"], "corners": p["corners"], "rot": 0} for p in pages],
+        "mode": "doc", "contrast": 2, "sharpness": 1, "page_size": "a4", "weight": "light", "name": "Договор"})
+    assert r.status_code == 200, r.text
+    (res,) = r.json()["results"]
+    assert res["name"] == "Договор.pdf"
+    pdf = PdfReader(io.BytesIO(phone.get(res["url"]).content))
+    assert len(pdf.pages) == 2 and round(float(pdf.pages[0].mediabox.height)) == 842
+
+
+def test_scanner_pages_are_private_and_expire(client, pc, phone, tmp_path):
+    pair(pc, phone)
+    page = phone.post("/api/scan/pages", files={"files": ("p.jpg", scan_photo(tmp_path), "image/jpeg")}).json()["pages"][0]
+    stranger = Device(client, "phone")
+    pair(Device(client, "pc"), stranger)
+    assert stranger.get(page["image_url"]).status_code == 404
+    assert stranger.get(f"/s/{page['id']}/preview").status_code == 404
+    assert stranger.post("/api/scan/pdf", json={"pages": [{"id": page["id"]}]}).status_code == 404
+    s = store(client)
+    s.run("UPDATE scan_pages SET created=created-?", s.settings.tool_ttl_min * 60 + 1)
+    client.portal.call(s.cleanup)
+    assert phone.get(page["image_url"]).status_code == 404
+    assert not list(s.tools_root.glob("scan-*"))
+
+
+def test_scanner_rejects_non_photos(pc, phone):
+    pair(pc, phone)
+    r = phone.post("/api/scan/pages", files={"files": ("x.svg", b"<svg/>", "image/svg+xml")})
+    assert r.status_code == 400
+    r = phone.post("/api/scan/pages", files={"files": ("broken.jpg", b"not a photo", "image/jpeg")})
+    assert r.status_code == 422
+    assert not list(store(phone.client).tools_root.glob("scan-*"))  # ничего не осталось на диске

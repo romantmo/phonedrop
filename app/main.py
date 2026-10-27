@@ -38,7 +38,7 @@ import httpx
 import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers, UploadFile
@@ -184,6 +184,12 @@ CREATE TABLE IF NOT EXISTS tool_results (
     created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tool_results_by_owner ON tool_results(owner, created);
+CREATE TABLE IF NOT EXISTS scan_pages (
+    id      TEXT PRIMARY KEY,
+    owner   TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    created REAL NOT NULL
+);
 """
 
 
@@ -407,6 +413,15 @@ class Store:
     def tool_path(self, rid: str) -> Path:
         return self.tools_root / rid
 
+    def scan_path(self, pid: str, kind: str) -> Path:
+        # kind: "orig" — фото как есть, "work" — уменьшенная копия для быстрых превью
+        return self.tools_root / f"scan-{pid}.{kind}"
+
+    def remove_scan_page(self, pid: str) -> None:
+        for kind in ("orig", "work"):
+            self.scan_path(pid, kind).unlink(missing_ok=True)
+        self.run("DELETE FROM scan_pages WHERE id=?", pid)
+
     def tool_public(self, row: sqlite3.Row) -> dict:
         return {"id": row["id"], "name": row["name"], "mime": row["mime"], "size": row["size"],
                 "url": f"/t/{row['id']}", "download_url": f"/t/{row['id']}?dl=1",
@@ -542,11 +557,16 @@ class Store:
         for row in self.q("SELECT * FROM tool_results WHERE created<?", now - s.tool_ttl_min * 60):
             self.tool_path(row["id"]).unlink(missing_ok=True)
             self.run("DELETE FROM tool_results WHERE id=?", row["id"])
+        # 7) Страницы сканера, с которыми давно ничего не делали.
+        for row in self.q("SELECT id FROM scan_pages WHERE created<?", now - s.tool_ttl_min * 60):
+            self.remove_scan_page(row["id"])
 
     def delete_owner_tools(self, owner: str) -> None:
         for row in self.q("SELECT * FROM tool_results WHERE owner=?", owner):
             self.tool_path(row["id"]).unlink(missing_ok=True)
         self.run("DELETE FROM tool_results WHERE owner=?", owner)
+        for row in self.q("SELECT id FROM scan_pages WHERE owner=?", owner):
+            self.remove_scan_page(row["id"])
 
 
 def preview(row: sqlite3.Row) -> str:
@@ -682,7 +702,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         h = response.headers
         host = request.headers.get("host", "")
         csp = CSP + (f" wss://{host} ws://{host}" if HOST_RE.fullmatch(host) else "")
-        if not request.url.path.startswith(("/f/", "/t/")):  # для файлов политику ставят сами обработчики
+        if not request.url.path.startswith(("/f/", "/t/", "/s/")):  # для файлов политику ставят сами обработчики
             h.setdefault("Content-Security-Policy", csp)
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
@@ -908,14 +928,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return [UploadFile(path.open("rb"), filename=name, headers=Headers({"content-type": mime}))
                 for path, name, mime in items]
 
-    async def run_converter(op: str, inputs: list[tuple[Path, str, str]], options: dict, out_dir: Path) -> list[Path]:
-        """Отправляет файлы конвертеру и раскладывает результаты в out_dir (по порядку)."""
-        handles = [path.open("rb") for path, _, _ in inputs]
+    async def converter_post(path: str, inputs: list[tuple[Path, str, str]], data: dict) -> httpx.Response:
+        """Отправляет файлы конвертеру. Его ошибки превращаются в понятные сообщения."""
+        handles = [p.open("rb") for p, _, _ in inputs]
         try:
             files = [("files", (name, fh, mime)) for fh, (_, name, mime) in zip(handles, inputs)]
             async with httpx.AsyncClient(base_url=settings.converter_url, transport=store.converter_transport,
                                          timeout=httpx.Timeout(300, connect=5)) as client:
-                response = await client.post(f"/convert/{op}", data=options, files=files)
+                response = await client.post(path, data=data, files=files)
         except httpx.HTTPError:
             raise HTTPException(503, "Конвертер сейчас недоступен, попробуй через минуту")
         finally:
@@ -929,6 +949,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, detail if isinstance(detail, str) else "Не получилось конвертировать файл")
         if response.status_code != 200:
             raise HTTPException(502, "Конвертер не справился с этим файлом")
+        return response
+
+    async def run_converter(op: str, inputs: list[tuple[Path, str, str]], options: dict, out_dir: Path) -> list[Path]:
+        """Отправляет файлы конвертеру и раскладывает результаты в out_dir (по порядку)."""
+        response = await converter_post(f"/convert/{op}", inputs, options)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         def unpack() -> list[Path]:
@@ -948,6 +973,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await run_in_threadpool(unpack)
         except zipfile.BadZipFile:
             raise HTTPException(502, "Конвертер вернул повреждённый ответ")
+
+    def save_results(owner: str, outs: list[Path], names: list[tuple[str, str]]) -> list[dict]:
+        results = []
+        now = time.time()
+        for i, (path, (name, mime)) in enumerate(zip(outs, names)):
+            rid = uuid.uuid4().hex
+            size = path.stat().st_size
+            path.replace(store.tool_path(rid))
+            store.run("INSERT INTO tool_results (id, owner, name, mime, size, created) VALUES (?,?,?,?,?,?)",
+                      rid, owner, name, mime, size, now + i / 1000)
+            results.append(store.tool_public(store.one("SELECT * FROM tool_results WHERE id=?", rid)))
+        return results
 
     def tool_owner(request: Request) -> tuple[str, str, sqlite3.Row]:
         role = role_of(request)
@@ -1304,6 +1341,110 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---------------------------------------------------------- инструменты
 
+    # ------------------------------------------------------------ сканер 2.0
+    # Каждое фото загружается ОДИН раз. Дальше телефон присылает только настройки
+    # (уголки, режим, контраст…), а превью и PDF сервер делает из уже загруженного фото.
+
+    def scan_page(pid: str, owners: set[str]) -> sqlite3.Row:
+        row = store.one("SELECT * FROM scan_pages WHERE id=?", pid)
+        if not row or row["owner"] not in owners or not store.scan_path(pid, "orig").exists():
+            raise HTTPException(404, f"Страница не найдена — фото хранятся {settings.tool_ttl_min} минут")
+        store.run("UPDATE scan_pages SET created=? WHERE id=?", time.time(), pid)  # продлеваем, пока работаем
+        return row
+
+    @app.post("/api/scan/pages")
+    async def scan_add_pages(request: Request):
+        _, owner, _ = tool_owner(request)
+        limiter.hit(f"tool:{owner}", settings.tools_per_min, 60)
+        ensure_disk_space()
+        work = store.tmp_root / uuid.uuid4().hex
+        work.mkdir(parents=True)
+        pages = []
+        try:
+            form = await read_form(request, settings.tool_max_mb)
+            try:
+                uploads = [v for v in form.getlist("files") if isinstance(v, UploadFile)]
+                if not uploads or len(uploads) > 20:
+                    raise HTTPException(400, "Добавь от 1 до 20 фото за раз")
+                for up in uploads:
+                    name = safe_filename(up.filename)
+                    mime = normalize_mime(up.content_type) or mimetypes.guess_type(name)[0] or ""
+                    if not is_image(name, mime):
+                        raise HTTPException(400, f"«{name}» — не фото")
+                    pid = uuid.uuid4().hex
+                    orig = store.scan_path(pid, "orig")
+                    if await run_in_threadpool(copy_limited, up.file, orig, settings.tool_max_mb * MB) is None:
+                        orig.unlink(missing_ok=True)
+                        raise HTTPException(413, f"Слишком большое фото. Лимит {settings.tool_max_mb} МБ")
+                    try:
+                        info = (await converter_post("/scan/prepare", [(orig, name, mime)], {})).json()
+                        store.scan_path(pid, "work").write_bytes(base64.b64decode(info["work"]))
+                    except BaseException:
+                        orig.unlink(missing_ok=True)
+                        raise
+                    store.run("INSERT INTO scan_pages (id, owner, name, created) VALUES (?,?,?,?)",
+                              pid, owner, name, time.time())
+                    pages.append({"id": pid, "name": name, "corners": info.get("corners"),
+                                  "width": info.get("width"), "height": info.get("height"),
+                                  "image_url": f"/s/{pid}/work"})
+            finally:
+                await form.close()
+        except BaseException:
+            for page in pages:  # что-то сломалось посреди пачки — убираем уже загруженное
+                store.remove_scan_page(page["id"])
+            raise
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return {"pages": pages}
+
+    @app.get("/s/{pid}/work")
+    async def scan_work_image(pid: str, request: Request):
+        scan_page(pid, owner_from_cookies(request))
+        return FileResponse(store.scan_path(pid, "work"), media_type="image/jpeg",
+                            headers={"Content-Security-Policy": "sandbox"})
+
+    @app.get("/s/{pid}/preview")
+    async def scan_preview(pid: str, request: Request, p: str = ""):
+        owners = owner_from_cookies(request)
+        row = scan_page(pid, owners)
+        limiter.hit(f"preview:{row['owner']}", 300, 60)
+        if len(p) > 2000:
+            raise HTTPException(400, "Слишком длинные параметры")
+        response = await converter_post("/scan/render", [(store.scan_path(pid, "work"), "work.jpg", "image/jpeg")],
+                                        {"params": p or "{}"})
+        return Response(response.content, media_type="image/jpeg", headers={"Content-Security-Policy": "sandbox"})
+
+    @app.post("/api/scan/pdf")
+    async def scan_make_pdf(request: Request):
+        _, owner, _ = tool_owner(request)
+        limiter.hit(f"tool:{owner}", settings.tools_per_min, 60)
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("pages"), list) or not body["pages"]:
+            raise HTTPException(400, "Добавь хотя бы одну страницу")
+        if len(body["pages"]) > 50:
+            raise HTTPException(400, "Не больше 50 страниц в одном PDF")
+        common = {k: body.get(k) for k in ("mode", "contrast", "sharpness")}
+        inputs, params = [], []
+        for page in body["pages"]:
+            pid = page.get("id") if isinstance(page, dict) else None
+            row = scan_page(pid, {owner}) if isinstance(pid, str) else None
+            if row is None:
+                raise HTTPException(404, "Страница не найдена")
+            inputs.append((store.scan_path(pid, "orig"), row["name"], "image/jpeg"))
+            params.append({**common, "corners": page.get("corners"), "rot": page.get("rot", 0)})
+        page_size = body.get("page_size") if body.get("page_size") in ("auto", "a4", "a5", "letter") else "auto"
+        weight = body.get("weight") if body.get("weight") in ("light", "normal", "max") else "normal"
+        title = safe_filename(body.get("name")) if isinstance(body.get("name"), str) else "Скан"
+        name = title if title.lower().endswith(".pdf") else f"{title}.pdf"
+        work = store.tmp_root / uuid.uuid4().hex
+        try:
+            outs = await run_converter("scan-pdf", inputs, {
+                "pages": json.dumps(params), "page_size": page_size, "weight": weight}, work)
+            results = save_results(owner, outs, [(name, "application/pdf")])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return {"results": results, "ttl_min": settings.tool_ttl_min}
+
     @app.post("/api/tools/send")
     async def send_tool_results(request: Request):
         """«Отправить на компьютер»: кладём готовые файлы в выбранный чат."""
@@ -1353,16 +1494,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await form.close()
             check_tool_inputs(op, inputs)
             outs = await run_converter(op, inputs, options, work / "out")
-            names = result_names(op, inputs, len(outs), title)
-            results = []
-            now = time.time()
-            for i, (path, (name, mime)) in enumerate(zip(outs, names)):
-                rid = uuid.uuid4().hex
-                size = path.stat().st_size
-                path.replace(store.tool_path(rid))
-                store.run("INSERT INTO tool_results (id, owner, name, mime, size, created) VALUES (?,?,?,?,?,?)",
-                          rid, owner, name, mime, size, now + i / 1000)
-                results.append(store.tool_public(store.one("SELECT * FROM tool_results WHERE id=?", rid)))
+            results = save_results(owner, outs, result_names(op, inputs, len(outs), title))
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return {"results": results, "ttl_min": settings.tool_ttl_min}
