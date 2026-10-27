@@ -97,7 +97,7 @@
       else clearInterval(pairTimer);
       render();
       chat.connect();
-      if (state.linked) push.sync(ROLE, state.vapid_key);
+      if (state.linked) { push.sync(ROLE, state.vapid_key); PDTransfers.refresh(); }
     } catch (e) {
       toast(e.message, true);
       setTimeout(start, 5000);
@@ -121,6 +121,10 @@
     if (msg.type === "linked") {
       toast("Телефон подключён");
       start();
+    } else if (msg.type === "transfers_changed") {
+      PDTransfers.refresh();
+    } else if (msg.type === "shares_changed") {
+      PDShares.refresh();
     } else if (msg.type === "relinked") {
       closeRelink();
       toast("Телефон переподключён — все чаты на нём");
@@ -209,7 +213,9 @@
     section = name;
     $("dropZone").hidden = name !== "chat";
     $("toolsMain").hidden = name !== "tools";
-    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"]]) {
+    $("transfersMain").hidden = name !== "transfers";
+    if (name === "transfers") { $("trDot").hidden = true; PDTransfers.refresh(); }
+    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"], ["tabTransfers", "transfers"]]) {
       $(id).classList.toggle("on", section === value);
       $(id).setAttribute("aria-selected", String(section === value));
     }
@@ -232,6 +238,20 @@
   }
   $("tabChat").addEventListener("click", () => showSection("chat"));
   $("tabTools").addEventListener("click", () => showSection("tools"));
+  $("tabTransfers").addEventListener("click", () => showSection("transfers"));
+  function transferMode(share) {
+    $("trModeMine").classList.toggle("on", !share);
+    $("trModeShare").classList.toggle("on", share);
+    $("mineBody").hidden = share;
+    $("shareBody").hidden = !share;
+    if (share) PDShares.mount($("shareBody"));
+  }
+  $("trModeMine").addEventListener("click", () => transferMode(false));
+  $("trModeShare").addEventListener("click", () => transferMode(true));
+  PDTransfers.onIncoming((t) => {
+    toast(`📦 Пришёл файл «${t.name}» с «${t.from_label}»`);
+    if (section !== "transfers") $("trDot").hidden = false;
+  });
   $("toolBack").addEventListener("click", showToolsHome);
 
   // ---------- «Переподключить телефон» (телефон переустановили или сменили)

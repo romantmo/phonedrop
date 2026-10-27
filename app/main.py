@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import io
 import json
 import mimetypes
@@ -32,13 +33,15 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers, UploadFile
@@ -184,6 +187,55 @@ CREATE TABLE IF NOT EXISTS tool_results (
     created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tool_results_by_owner ON tool_results(owner, created);
+CREATE TABLE IF NOT EXISTS transfers (
+    id         TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    from_dev   TEXT,
+    from_label TEXT NOT NULL,
+    to_dev     TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    mime       TEXT,
+    received   INTEGER NOT NULL DEFAULT 0,
+    created    REAL NOT NULL,
+    done       REAL
+);
+CREATE INDEX IF NOT EXISTS transfers_by_account ON transfers(account_id);
+CREATE TABLE IF NOT EXISTS shares (
+    id          TEXT PRIMARY KEY,
+    account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    owner       TEXT NOT NULL,
+    owner_label TEXT NOT NULL,
+    token_hash  TEXT UNIQUE NOT NULL,
+    code_hash   TEXT UNIQUE NOT NULL,
+    pw_salt     TEXT,
+    pw_hash     TEXT,
+    once        INTEGER NOT NULL DEFAULT 0,
+    notify      INTEGER NOT NULL DEFAULT 1,
+    created     REAL NOT NULL,
+    expires     REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS share_files (
+    id        TEXT PRIMARY KEY,
+    share_id  TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    name      TEXT NOT NULL,
+    size      INTEGER NOT NULL,
+    mime      TEXT,
+    received  INTEGER NOT NULL DEFAULT 0,
+    done      REAL,
+    downloads INTEGER NOT NULL DEFAULT 0,
+    created   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS share_access (
+    key_hash TEXT PRIMARY KEY,
+    share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    expires  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS share_sessions (
+    key_hash TEXT PRIMARY KEY,
+    share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    expires  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS scan_pages (
     id      TEXT PRIMARY KEY,
     owner   TEXT NOT NULL,
@@ -228,6 +280,11 @@ class Settings:
     tool_max_mb: int = field(default_factory=lambda: _env_int("TOOL_MAX_MB", 100))
     tool_ttl_min: int = field(default_factory=lambda: _env_int("TOOL_TTL_MIN", 30))
     tools_per_min: int = field(default_factory=lambda: _env_int("TOOLS_PER_MIN", 20))
+    # Передачи между компьютерами: большие файлы по частям, хранятся сутки.
+    transfer_max_mb: int = field(default_factory=lambda: _env_int("TRANSFER_MAX_MB", 10240))
+    transfer_quota_mb: int = field(default_factory=lambda: _env_int("TRANSFER_QUOTA_MB", 20480))
+    transfer_ttl_hours: int = field(default_factory=lambda: _env_int("TRANSFER_TTL_HOURS", 24))
+    transfer_chunk_mb: int = field(default_factory=lambda: _env_int("TRANSFER_CHUNK_MB", 8))
 
 
 class PushGone(Exception):
@@ -245,6 +302,8 @@ class Store:
         self.files_root = settings.data_dir / "files"
         self.tools_root = settings.data_dir / "tools"  # результаты инструментов (живут 30 минут)
         self.tmp_root = settings.data_dir / "tmp"
+        self.transfers_root = settings.data_dir / "transfers"
+        self.transfer_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.converter_transport = None  # в тестах сюда подставляется конвертер «в памяти»
         self.preview_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.db: sqlite3.Connection | None = None
@@ -260,6 +319,7 @@ class Store:
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.files_root.mkdir(parents=True, exist_ok=True)
         self.tools_root.mkdir(parents=True, exist_ok=True)
+        self.transfers_root.mkdir(parents=True, exist_ok=True)
         shutil.rmtree(self.tmp_root, ignore_errors=True)  # остатки прерванных конвертаций
         self.tmp_root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(
@@ -272,10 +332,22 @@ class Store:
         # После перезапуска (например, деплоя) даём «чужим» компьютерам время переподключиться.
         self.run("UPDATE devices SET last_seen=? WHERE mode='temp' OR account_id IS NULL", time.time())
         self._load_vapid()
+        self._load_secret()
 
     def close(self) -> None:
         if self.db:
             self.db.close()
+
+    def _load_secret(self) -> None:
+        # Секрет сервера: им «подписываются» отпечатки ссылок и кодов посылок.
+        path = self.settings.data_dir / "secret.key"
+        if not path.exists():
+            path.write_bytes(secrets.token_bytes(32))
+            path.chmod(0o600)
+        self.secret = path.read_bytes()
+
+    def keyed_hash(self, value: str) -> str:
+        return hmac.new(self.secret, value.encode(), hashlib.sha256).hexdigest()
 
     def _load_vapid(self) -> None:
         # Ключ VAPID подписывает наши push-уведомления. Создаётся один раз и хранится в DATA_DIR.
@@ -402,12 +474,16 @@ class Store:
         self.run("UPDATE accounts SET token_hash=?, last_active=? WHERE id=?", token_hash(new_token), now, target["id"])
         if current:
             self.run("UPDATE devices SET account_id=? WHERE account_id=?", target["id"], current["id"])
+            self.run("UPDATE transfers SET account_id=? WHERE account_id=?", target["id"], current["id"])
+            self.run("UPDATE shares SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE push_subs SET owner=? WHERE owner=?", f"acc:{target['id']}", f"acc:{current['id']}")
             self.delete_owner_tools(f"acc:{current['id']}")
             self.run("DELETE FROM accounts WHERE id=?", current["id"])
         return dev, self.one("SELECT * FROM accounts WHERE id=?", target["id"]), new_token, old_subs
 
     def delete_device(self, device_id: str) -> None:
+        for t in self.q("SELECT id FROM transfers WHERE to_dev=?", device_id):
+            self.transfer_path(t["id"]).unlink(missing_ok=True)  # получателя нет — файл не нужен
         self.run("DELETE FROM push_subs WHERE owner=?", f"dev:{device_id}")
         self.run("DELETE FROM devices WHERE id=?", device_id)  # сообщения удалятся каскадом
 
@@ -458,6 +534,60 @@ class Store:
 
     def tool_path(self, rid: str) -> Path:
         return self.tools_root / rid
+
+    # ---------- передачи между компьютерами
+    def transfer_path(self, tid: str) -> Path:
+        return self.transfers_root / tid
+
+    def delete_transfer(self, tid: str) -> None:
+        self.transfer_path(tid).unlink(missing_ok=True)
+        self.run("DELETE FROM transfers WHERE id=?", tid)
+        self.transfer_locks.pop(tid, None)
+
+    def transfer_public(self, row: sqlite3.Row, me: str) -> dict:
+        target = self.device(row["to_dev"])
+        data = {
+            "id": row["id"], "name": row["name"], "size": row["size"], "mime": row["mime"],
+            "received": row["received"], "done": bool(row["done"]), "created": row["created"],
+            "expires": row["created"] + self.settings.transfer_ttl_hours * 3600,
+            "from_label": row["from_label"], "to_label": target["label"] if target else "?",
+            "direction": "in" if row["to_dev"] == me else "out",
+        }
+        if row["done"]:
+            data["url"] = f"/x/{row['id']}"
+        return data
+
+    # ---------- посылки (по ссылке и коду)
+    def share_path(self, fid: str) -> Path:
+        return self.transfers_root / f"s-{fid}"
+
+    def delete_share(self, sid: str) -> None:
+        for f in self.q("SELECT id FROM share_files WHERE share_id=?", sid):
+            self.share_path(f["id"]).unlink(missing_ok=True)
+            self.transfer_locks.pop(f["id"], None)
+        self.run("DELETE FROM shares WHERE id=?", sid)  # файлы и сессии удалятся каскадом
+
+    def delete_share_file(self, fid: str) -> None:
+        self.share_path(fid).unlink(missing_ok=True)
+        self.run("DELETE FROM share_files WHERE id=?", fid)
+        self.transfer_locks.pop(fid, None)
+
+    def share_files(self, sid: str) -> list[dict]:
+        return [{"id": f["id"], "name": f["name"], "size": f["size"], "mime": f["mime"], "received": f["received"],
+                 "done": bool(f["done"]), "downloads": f["downloads"]}
+                for f in self.q("SELECT * FROM share_files WHERE share_id=? ORDER BY created", sid)]
+
+    def account_used_bytes(self, account_id: str) -> int:
+        a = self.one("SELECT COALESCE(SUM(size), 0) AS n FROM transfers WHERE account_id=?", account_id)["n"]
+        b = self.one("SELECT COALESCE(SUM(f.size), 0) AS n FROM share_files f JOIN shares s ON s.id=f.share_id "
+                     "WHERE s.account_id=?", account_id)["n"]
+        return a + b
+
+    def reserved_bytes(self) -> int:
+        """Сколько ещё должно «доехать» во все незаконченные загрузки — это место уже занято."""
+        a = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM transfers WHERE done IS NULL")["n"]
+        b = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM share_files WHERE done IS NULL")["n"]
+        return a + b
 
     def scan_path(self, pid: str, kind: str) -> Path:
         # kind: "orig" — фото как есть, "work" — уменьшенная копия для быстрых превью
@@ -603,6 +733,14 @@ class Store:
         for row in self.q("SELECT * FROM tool_results WHERE created<?", now - s.tool_ttl_min * 60):
             self.tool_path(row["id"]).unlink(missing_ok=True)
             self.run("DELETE FROM tool_results WHERE id=?", row["id"])
+        # 7а) Передачи между компьютерами: живут сутки (и недокачанные тоже).
+        for row in self.q("SELECT id FROM transfers WHERE created<?", now - s.transfer_ttl_hours * 3600):
+            self.delete_transfer(row["id"])
+        # 7б) Посылки по ссылке/коду: срок вышел — удаляем.
+        for row in self.q("SELECT id FROM shares WHERE expires<?", now):
+            self.delete_share(row["id"])
+        self.run("DELETE FROM share_sessions WHERE expires<?", now)
+        self.run("DELETE FROM share_access WHERE expires<?", now)
         # 7) Страницы сканера, с которыми давно ничего не делали.
         for row in self.q("SELECT id FROM scan_pages WHERE created<?", now - s.tool_ttl_min * 60):
             self.remove_scan_page(row["id"])
@@ -748,14 +886,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         h = response.headers
         host = request.headers.get("host", "")
         csp = CSP + (f" wss://{host} ws://{host}" if HOST_RE.fullmatch(host) else "")
-        if not request.url.path.startswith(("/f/", "/t/", "/s/")):  # для файлов политику ставят сами обработчики
+        path = request.url.path
+        is_guest_file = path.startswith("/g/") and path.count("/") >= 3  # /g/<ключ>/<файл>
+        if not path.startswith(("/f/", "/t/", "/s/", "/x/")) and not is_guest_file:  # для файлов политику ставят сами обработчики
             h.setdefault("Content-Security-Policy", csp)
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
         h.setdefault("Referrer-Policy", "no-referrer")
         h.setdefault("Cross-Origin-Opener-Policy", "same-origin")
         h.setdefault("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
-        path = request.url.path
         if path.startswith("/static/") or path in ("/sw.js", "/manifest.webmanifest"):
             h.setdefault("Cache-Control", "no-cache")  # всегда проверять свежую версию после деплоя
         else:
@@ -1348,6 +1487,413 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await form.close()
         return RedirectResponse(f"/chat?c={dev['id']}&shared={len(items)}", status_code=303)
+
+    # ------------------------------------------------- передачи между компьютерами
+    # Большой файл (до 10 ГБ) идёт с компьютера на компьютер через сервер частями по 8 МБ.
+    # Оборвалась связь — загрузка продолжается с последней принятой части. Хранится сутки.
+
+    async def write_chunk(path: Path, size: int, offset: int, request: Request) -> int:
+        """Пишет одну часть (до TRANSFER_CHUNK_MB) в файл с нужного места. Возвращает, сколько всего получено."""
+        if shutil.disk_usage(store.transfers_root).free < settings.min_free_disk_mb * MB:
+            raise HTTPException(507, "На сервере заканчивается место, попробуй позже")
+        limit = min(settings.transfer_chunk_mb * MB, size - offset)
+        written = 0
+        with path.open("r+b") as f:
+            f.seek(offset)
+            async for piece in request.stream():
+                written += len(piece)
+                if written > limit:
+                    raise HTTPException(413, "Слишком большая часть файла")
+                await run_in_threadpool(f.write, piece)
+        return offset + written
+
+    def check_space(account_id: str, size: int) -> None:
+        if size > settings.transfer_max_mb * MB:
+            raise HTTPException(413, f"Слишком большой файл. Максимум {settings.transfer_max_mb // 1024} ГБ")
+        if store.account_used_bytes(account_id) + size > settings.transfer_quota_mb * MB:
+            raise HTTPException(507, f"Лимит — {settings.transfer_quota_mb // 1024} ГБ файлов одновременно. "
+                                     "Удали старые передачи или подожди, пока они удалятся сами")
+        if shutil.disk_usage(store.transfers_root).free - store.reserved_bytes() - size < settings.min_free_disk_mb * MB:
+            raise HTTPException(507, "На сервере сейчас не хватает места для такого файла. Попробуй позже")
+
+    def my_transfer(tid: str, dev: sqlite3.Row) -> sqlite3.Row:
+        row = store.one("SELECT * FROM transfers WHERE id=? AND account_id=?", tid, dev["account_id"])
+        if not row or dev["id"] not in (row["from_dev"], row["to_dev"]):
+            raise HTTPException(404, "Передача не найдена — возможно, прошли сутки и файл удалён")
+        return row
+
+    async def transfers_changed(row: sqlite3.Row) -> None:
+        for dev_id in {row["from_dev"], row["to_dev"]} - {None}:
+            await store.send_ws(store.pc_sockets.get(dev_id, set()), {"type": "transfers_changed"})
+
+    @app.get("/api/pc/devices")
+    async def pc_devices(request: Request):
+        """Другие мои компьютеры — куда можно отправить файл."""
+        me = require_pc(request)
+        rows = store.q("SELECT * FROM devices WHERE account_id=? AND id!=?", me["account_id"], me["id"])
+        devices = [{"id": d["id"], "label": d["label"], "mode": d["mode"], "online": store.pc_online(d["id"])}
+                   for d in rows]
+        devices.sort(key=lambda d: (not d["online"], d["label"].lower()))
+        return {"devices": devices}
+
+    @app.get("/api/transfers")
+    async def list_transfers(request: Request):
+        me = require_pc(request)
+        rows = store.q("SELECT * FROM transfers WHERE account_id=? AND (from_dev=? OR to_dev=?) ORDER BY created DESC",
+                       me["account_id"], me["id"], me["id"])
+        items = [store.transfer_public(r, me["id"]) for r in rows]
+        used = store.account_used_bytes(me["account_id"])
+        return {
+            "incoming": [t for t in items if t["direction"] == "in" and t["done"]],
+            "outgoing": [t for t in items if t["direction"] == "out"],
+            "max_mb": settings.transfer_max_mb, "quota_mb": settings.transfer_quota_mb, "used": used,
+            "ttl_hours": settings.transfer_ttl_hours, "chunk_mb": settings.transfer_chunk_mb,
+        }
+
+    @app.post("/api/transfers")
+    async def create_transfer(request: Request):
+        me = require_pc(request)
+        limiter.hit(f"transfer:{me['account_id']}", 60, 600)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        name = safe_filename(body.get("name") if isinstance(body.get("name"), str) else "")
+        size = body.get("size")
+        if not isinstance(size, int) or size <= 0:
+            raise HTTPException(400, "Пустой файл отправлять незачем")
+        target = store.device(body.get("to")) if isinstance(body.get("to"), str) else None
+        if not target or target["account_id"] != me["account_id"] or target["id"] == me["id"]:
+            raise HTTPException(404, "Компьютер-получатель не найден")
+        check_space(me["account_id"], size)
+        mime = body.get("mime") if isinstance(body.get("mime"), str) else ""
+        tid = uuid.uuid4().hex
+        store.run("INSERT INTO transfers (id, account_id, from_dev, from_label, to_dev, name, size, mime, created) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)", tid, me["account_id"], me["id"], me["label"], target["id"],
+                  name, size, normalize_mime(mime) or mimetypes.guess_type(name)[0] or "application/octet-stream",
+                  time.time())
+        store.transfer_path(tid).touch()
+        return store.transfer_public(store.one("SELECT * FROM transfers WHERE id=?", tid), me["id"])
+
+    @app.put("/api/transfers/{tid}/data")
+    async def upload_transfer_chunk(tid: str, request: Request, offset: int = -1):
+        """Одна часть файла. Сервер принимает части строго по порядку: offset должен
+        совпасть с тем, сколько уже получено, — иначе ответ 409 с правильным местом."""
+        me = require_pc(request)
+        async with store.transfer_locks[tid]:
+            row = my_transfer(tid, me)
+            if row["from_dev"] != me["id"]:
+                raise HTTPException(403, "Догружать файл может только отправитель")
+            if row["done"]:
+                return {"received": row["received"], "done": True}
+            if offset != row["received"]:
+                return JSONResponse({"detail": "Не то место в файле", "received": row["received"]}, status_code=409)
+            received = await write_chunk(store.transfer_path(tid), row["size"], offset, request)
+            done = time.time() if received == row["size"] else None
+            store.run("UPDATE transfers SET received=?, done=? WHERE id=?", received, done, tid)
+        if done:
+            row = store.one("SELECT * FROM transfers WHERE id=?", tid)
+            await transfers_changed(row)
+            store.push(f"dev:{row['to_dev']}", {
+                "title": f"📦 Файл с «{row['from_label']}»",
+                "body": f"{row['name']} · {round(row['size'] / MB, 1)} МБ — скачай в течение {settings.transfer_ttl_hours} ч",
+                "url": "/", "tag": f"transfer-{tid}",
+            })
+        return {"received": received, "done": bool(done)}
+
+    @app.delete("/api/transfers/{tid}")
+    async def delete_transfer(tid: str, request: Request):
+        me = require_pc(request)
+        row = my_transfer(tid, me)
+        store.delete_transfer(tid)
+        await transfers_changed(row)
+        return {"ok": True}
+
+    @app.get("/x/{tid}")
+    async def download_transfer(tid: str, request: Request):
+        # Скачивание поддерживает «докачку» (Range): Chrome продолжит прерванную загрузку.
+        dev = store.device_by_token(request.cookies.get(PC_COOKIE))
+        row = store.one("SELECT * FROM transfers WHERE id=?", tid)
+        if not dev or not row or row["account_id"] != dev["account_id"] or dev["id"] not in (row["from_dev"], row["to_dev"]):
+            raise HTTPException(404, "Файл не найден — возможно, прошли сутки и он удалён")
+        if not row["done"]:
+            raise HTTPException(409, "Файл ещё загружается")
+        return FileResponse(store.transfer_path(tid), media_type="application/octet-stream", filename=row["name"],
+                            content_disposition_type="attachment", headers={"Content-Security-Policy": "sandbox"})
+
+    # ------------------------------------------------- посылки «другому человеку»
+    # Ссылка и 9-значный код. Получатель открывает ссылку или вводит код на /get —
+    # без регистрации. На сервере хранятся только «отпечатки» ссылки, кода и пароля.
+    SHARE_HOURS = (1, 6, 24)
+    GUEST_COOKIE = "pd_guest"
+
+    def account_of(role: str, who: sqlite3.Row) -> str:
+        return who["account_id"] if role == "pc" else who["id"]
+
+    def new_share_secrets() -> tuple[str, str]:
+        token = secrets.token_urlsafe(24)
+        while True:  # 9 цифр; совпадение с действующим кодом почти невозможно, но проверяем
+            code = f"{secrets.randbelow(10**9):09d}"
+            if not store.one("SELECT 1 FROM shares WHERE code_hash=?", store.keyed_hash(code)):
+                return token, code
+
+    def share_links(request: Request, token: str, code: str) -> dict:
+        return {"link": f"{base_url(request)}/g/{token}", "code": f"{code[:3]} {code[3:6]} {code[6:]}",
+                "get_url": f"{base_url(request)}/get"}
+
+    def hash_password(password: str, salt: bytes) -> str:
+        return hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32).hex()
+
+    def owner_share(sid: str, request: Request) -> tuple[sqlite3.Row, str, str]:
+        role, owner, who = tool_owner(request)
+        row = store.one("SELECT * FROM shares WHERE id=? AND account_id=?", sid, account_of(role, who))
+        if not row:
+            raise HTTPException(404, "Посылка не найдена — возможно, срок вышел")
+        return row, role, owner
+
+    def share_owner_public(row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "owner_label": row["owner_label"], "created": row["created"],
+                "expires": row["expires"], "once": bool(row["once"]), "notify": bool(row["notify"]),
+                "has_password": bool(row["pw_hash"]), "files": store.share_files(row["id"])}
+
+    async def shares_changed(row: sqlite3.Row) -> None:
+        kind, _, key = row["owner"].partition(":")
+        sockets = store.pc_sockets.get(key, set()) if kind == "dev" else store.phone_sockets.get(key, set())
+        await store.send_ws(sockets, {"type": "shares_changed"})
+
+    @app.get("/api/shares")
+    async def list_shares(request: Request):
+        role, _, who = tool_owner(request)
+        rows = store.q("SELECT * FROM shares WHERE account_id=? ORDER BY created DESC", account_of(role, who))
+        return {"shares": [share_owner_public(r) for r in rows], "hours": SHARE_HOURS,
+                "max_mb": settings.transfer_max_mb, "chunk_mb": settings.transfer_chunk_mb,
+                "quota_mb": settings.transfer_quota_mb, "used": store.account_used_bytes(account_of(role, who))}
+
+    @app.post("/api/shares")
+    async def create_share(request: Request):
+        role, owner, who = tool_owner(request)
+        limiter.hit(f"share:{owner}", 30, 600)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        hours = body.get("hours") if body.get("hours") in SHARE_HOURS else 24
+        password = body.get("password") if isinstance(body.get("password"), str) else ""
+        password = password.strip()
+        if password and not (4 <= len(password) <= 64):
+            raise HTTPException(400, "Пароль — от 4 до 64 символов")
+        salt = secrets.token_bytes(16) if password else None
+        # Как отправитель подпишется для получателя («Файлы от Роман»). По умолчанию — имя компьютера.
+        raw_name = body.get("name") if isinstance(body.get("name"), str) else ""
+        sender = re.sub(r"[\x00-\x1f\x7f]", "", raw_name).strip()[:40] or (who["label"] if role == "pc" else "PhoneDrop")
+        token, code = new_share_secrets()
+        sid = uuid.uuid4().hex
+        now = time.time()
+        store.run("INSERT INTO shares (id, account_id, owner, owner_label, token_hash, code_hash, pw_salt, pw_hash, "
+                  "once, notify, created, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  sid, account_of(role, who), owner, sender,
+                  store.keyed_hash(token), store.keyed_hash(code), salt.hex() if salt else None,
+                  hash_password(password, salt) if password else None,
+                  int(bool(body.get("once"))), int(body.get("notify", True) is not False), now, now + hours * 3600)
+        row = store.one("SELECT * FROM shares WHERE id=?", sid)
+        return {"share": share_owner_public(row), **share_links(request, token, code)}
+
+    @app.post("/api/shares/{sid}/rotate")
+    async def rotate_share(sid: str, request: Request):
+        """Новая ссылка и код (старые перестают работать). Нужна, если ссылку потеряли или она утекла."""
+        row, _, _ = owner_share(sid, request)
+        token, code = new_share_secrets()
+        store.run("UPDATE shares SET token_hash=?, code_hash=? WHERE id=?", store.keyed_hash(token), store.keyed_hash(code), sid)
+        store.run("DELETE FROM share_sessions WHERE share_id=?", sid)
+        store.run("DELETE FROM share_access WHERE share_id=?", sid)  # старые ссылки «по коду» тоже гаснут
+        return {"share": share_owner_public(store.one("SELECT * FROM shares WHERE id=?", sid)),
+                **share_links(request, token, code)}
+
+    @app.delete("/api/shares/{sid}")
+    async def delete_share(sid: str, request: Request):
+        owner_share(sid, request)
+        store.delete_share(sid)
+        return {"ok": True}
+
+    @app.post("/api/shares/{sid}/files")
+    async def add_share_file(sid: str, request: Request):
+        row, _, _ = owner_share(sid, request)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        size = body.get("size")
+        if not isinstance(size, int) or size <= 0:
+            raise HTTPException(400, "Пустой файл отправлять незачем")
+        if store.one("SELECT COUNT(*) AS n FROM share_files WHERE share_id=?", sid)["n"] >= 200:
+            raise HTTPException(400, "В одной посылке — не больше 200 файлов")
+        check_space(row["account_id"], size)
+        name = safe_filename(body.get("name") if isinstance(body.get("name"), str) else "")
+        mime = body.get("mime") if isinstance(body.get("mime"), str) else ""
+        fid = uuid.uuid4().hex
+        store.run("INSERT INTO share_files (id, share_id, name, size, mime, created) VALUES (?,?,?,?,?,?)",
+                  fid, sid, name, size, normalize_mime(mime) or mimetypes.guess_type(name)[0] or "application/octet-stream",
+                  time.time())
+        store.share_path(fid).touch()
+        return {"id": fid, "name": name, "size": size, "received": 0, "done": False, "downloads": 0}
+
+    @app.put("/api/shares/{sid}/files/{fid}/data")
+    async def upload_share_chunk(sid: str, fid: str, request: Request, offset: int = -1):
+        owner_share(sid, request)
+        async with store.transfer_locks[fid]:
+            f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=?", fid, sid)
+            if not f:
+                raise HTTPException(404, "Файл не найден")
+            if f["done"]:
+                return {"received": f["received"], "done": True}
+            if offset != f["received"]:
+                return JSONResponse({"detail": "Не то место в файле", "received": f["received"]}, status_code=409)
+            received = await write_chunk(store.share_path(fid), f["size"], offset, request)
+            done = time.time() if received == f["size"] else None
+            store.run("UPDATE share_files SET received=?, done=? WHERE id=?", received, done, fid)
+        return {"received": received, "done": bool(done)}
+
+    @app.delete("/api/shares/{sid}/files/{fid}")
+    async def delete_share_file(sid: str, fid: str, request: Request):
+        owner_share(sid, request)
+        if not store.one("SELECT 1 FROM share_files WHERE id=? AND share_id=?", fid, sid):
+            raise HTTPException(404, "Файл не найден")
+        store.delete_share_file(fid)
+        return {"ok": True}
+
+    # ---------- получатель (без регистрации)
+
+    @app.get("/get", include_in_schema=False)
+    async def guest_code_page():
+        return FileResponse(STATIC_DIR / "guest.html")
+
+    @app.get("/g/{token}", include_in_schema=False)
+    async def guest_share_page(token: str):
+        return FileResponse(STATIC_DIR / "guest.html")
+
+    def share_by_ref(ref: str) -> sqlite3.Row:
+        """ref — ключ из ссылки /g/<ключ>. Ссылка, открытая по коду, выглядит как /g/c.<ключ>."""
+        row = None
+        if ref.startswith("c."):
+            acc = store.one("SELECT share_id FROM share_access WHERE key_hash=? AND expires>?", token_hash(ref[2:]), time.time())
+            row = store.one("SELECT * FROM shares WHERE id=?", acc["share_id"]) if acc else None
+        elif ref:
+            row = store.one("SELECT * FROM shares WHERE token_hash=?", store.keyed_hash(ref))
+        if not row or row["expires"] < time.time():
+            raise HTTPException(404, "Посылка не найдена: ссылка или код неверные, или срок хранения закончился")
+        return row
+
+    def guest_allowed(row: sqlite3.Row, request: Request) -> bool:
+        if not row["pw_hash"]:
+            return True
+        key = request.cookies.get(GUEST_COOKIE)
+        return bool(key and store.one("SELECT 1 FROM share_sessions WHERE key_hash=? AND share_id=? AND expires>?",
+                                      token_hash(key), row["id"], time.time()))
+
+    @app.post("/api/get/code")
+    async def guest_by_code(request: Request):
+        check_origin(request.headers)
+        # Защита от подбора: 10 попыток за 10 минут с одного адреса и общий «предохранитель» на всех.
+        limiter.hit(f"code:{client_ip(request)}", 10, 600)
+        limiter.hit("code:all", 600, 600)
+        body = await request.json()
+        raw = body.get("code") if isinstance(body, dict) and isinstance(body.get("code"), str) else ""
+        code = re.sub(r"\D", "", raw)
+        row = store.one("SELECT * FROM shares WHERE code_hash=?", store.keyed_hash(code)) if len(code) == 9 else None
+        if not row or row["expires"] < time.time():
+            raise HTTPException(404, "Код не подходит или срок посылки закончился. Проверь цифры")
+        # Код подошёл — выдаём личную ссылку получателя (живёт, пока жива посылка).
+        key = secrets.token_urlsafe(24)
+        store.run("INSERT INTO share_access (key_hash, share_id, expires) VALUES (?,?,?)",
+                  token_hash(key), row["id"], row["expires"])
+        return {"ref": f"c.{key}"}
+
+    @app.post("/api/g/{ref}/unlock")
+    async def guest_unlock(ref: str, request: Request):
+        check_origin(request.headers)
+        row = share_by_ref(ref)
+        limiter.hit(f"pw:{client_ip(request)}:{row['id']}", 5, 900)  # 5 попыток пароля за 15 минут
+        body = await request.json()
+        password = body.get("password") if isinstance(body, dict) and isinstance(body.get("password"), str) else ""
+        if not row["pw_hash"]:
+            return {"ok": True}
+        if not hmac.compare_digest(hash_password(password.strip(), bytes.fromhex(row["pw_salt"])), row["pw_hash"]):
+            raise HTTPException(403, "Неверный пароль")
+        key = secrets.token_urlsafe(32)
+        store.run("INSERT INTO share_sessions (key_hash, share_id, expires) VALUES (?,?,?)",
+                  token_hash(key), row["id"], row["expires"])
+        response = JSONResponse({"ok": True})
+        response.set_cookie(GUEST_COOKIE, key, max_age=max(60, int(row["expires"] - time.time())),
+                            httponly=True, samesite="lax", secure=is_https(request), path="/")
+        return response
+
+    @app.get("/api/g/{ref}")
+    async def guest_share(ref: str, request: Request):
+        row = share_by_ref(ref)
+        if not guest_allowed(row, request):
+            return JSONResponse({"password": True, "owner_label": row["owner_label"]}, status_code=401)
+        files = store.share_files(row["id"])
+        return {"owner_label": row["owner_label"], "expires": row["expires"], "once": bool(row["once"]),
+                "files": [{"id": f["id"], "name": f["name"], "size": f["size"], "url": f"/g/{ref}/{f['id']}"}
+                          for f in files if f["done"]],
+                "uploading": [{"name": f["name"], "size": f["size"], "received": f["received"]}
+                              for f in files if not f["done"]]}
+
+    @app.get("/g/{ref}/{fid}")
+    async def guest_download(ref: str, fid: str, request: Request):
+        row = share_by_ref(ref)
+        if not guest_allowed(row, request):
+            raise HTTPException(403, "Сначала введи пароль")
+        f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=? AND done IS NOT NULL", fid, row["id"])
+        if not f:
+            raise HTTPException(404, "Файл не найден — возможно, его уже скачали и он удалён")
+        path = store.share_path(fid)
+        size = path.stat().st_size
+        start, end, status = 0, size - 1, 200
+        headers = {
+            "Content-Disposition": f"attachment; filename*=utf-8''{quote(f['name'])}",
+            "Content-Security-Policy": "sandbox",
+        }
+        # «Удалить после скачивания» — без докачки: файл исчезает сразу после полной загрузки.
+        if not row["once"]:
+            headers["Accept-Ranges"] = "bytes"
+            rng = request.headers.get("range")
+            if rng:
+                m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
+                if not m or (not m.group(1) and not m.group(2)):
+                    return PlainTextResponse("Неверный Range", 416, headers={"Content-Range": f"bytes */{size}"})
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                else:
+                    start = max(0, size - int(m.group(2)))
+                if start > end or start >= size:
+                    return PlainTextResponse("Неверный Range", 416, headers={"Content-Range": f"bytes */{size}"})
+                status = 206
+                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        headers["Content-Length"] = str(end - start + 1)
+        sid, owner, name, once, notify = row["id"], row["owner"], f["name"], row["once"], row["notify"]
+
+        async def body():
+            remaining = end - start + 1
+            with path.open("rb") as fh:
+                fh.seek(start)
+                while remaining > 0:
+                    piece = await run_in_threadpool(fh.read, min(MB, remaining))
+                    if not piece:
+                        break
+                    remaining -= len(piece)
+                    yield piece
+            if end == size - 1 and remaining == 0:  # дошли до конца файла — считаем «скачали»
+                store.run("UPDATE share_files SET downloads=downloads+1 WHERE id=?", fid)
+                if notify:
+                    store.push(owner, {"title": "📥 Файл скачали", "body": f"{name} — по твоей ссылке",
+                                       "url": "/" if owner.startswith("dev:") else "/chat", "tag": f"share-{fid}"})
+                if once:
+                    store.delete_share_file(fid)
+                    if not store.one("SELECT 1 FROM share_files WHERE share_id=?", sid):
+                        store.delete_share(sid)
+                current = store.one("SELECT * FROM shares WHERE id=?", sid)
+                await shares_changed(current or row)
+
+        return StreamingResponse(body(), status_code=status, media_type="application/octet-stream", headers=headers)
 
     @app.get("/f/{mid}")
     async def get_file(mid: str, request: Request, dl: int = 0):

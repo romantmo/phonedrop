@@ -57,6 +57,7 @@
         <p id="gateText">Открой PhoneDrop на компьютере и отсканируй QR-код.</p>
         <button class="btn primary block" id="gateScan" type="button">📷 Сканировать QR-код</button>
         <button class="btn block" id="gateInstall" type="button" hidden>📲 Установить приложение</button>
+        <a class="btn block" href="/get">📥 Мне прислали код</a>
         <p class="gate-tip" id="gateTip">Переустановил приложение или сменил телефон? На своём компьютере нажми <b>«📱 Переподключить телефон»</b> и отсканируй код — все чаты вернутся.</p>
       </div>
     </div>
@@ -89,6 +90,7 @@
       <input type="file" id="toolPickInput" hidden>
       <div class="seg" id="toolOptions" hidden></div>
       <div class="scan-settings" id="scanSettings" hidden></div>
+      <div class="share-box" id="shareBox" hidden></div>
       <div class="tool-results" id="toolResults" hidden>
         <h3>Готово ✅</h3>
         <div class="tool-results-list" id="toolResultsList"></div>
@@ -99,7 +101,7 @@
         <p class="tool-note" id="toolNote"></p>
       </div>
     </div>
-    <footer class="tool-foot">
+    <footer class="tool-foot" id="toolFoot">
       <div class="progress" id="toolProgress" hidden><div></div></div>
       <button class="btn primary block" id="toolRun" type="button" disabled>Сделать PDF</button>
     </footer>
@@ -205,6 +207,8 @@
 </div>
 
 <script src="/static/chat.js"></script>
+<script src="/static/uploader.js"></script>
+<script src="/static/shares.js"></script>
 <script src="/static/scanner.js"></script>
 <script src="/static/tools.js"></script>
 <script src="/static/phone.js"></script>

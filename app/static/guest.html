@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#283246">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1a2130">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<title>PhoneDrop — получить файлы</title>
+<link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/icons/favicon-64.png" sizes="64x64">
+<link rel="stylesheet" href="/static/chat.css">
+<link rel="stylesheet" href="/static/guest.css">
+</head>
+<body data-role="guest">
+<header class="chat-head">
+  <img class="logo" src="/static/icons/icon-192.png" alt="">
+  <div class="who">
+    <div class="name">PhoneDrop</div>
+    <div class="status">получить файлы</div>
+  </div>
+</header>
+
+<main class="g-main">
+  <!-- Ввод кода -->
+  <section class="g-card" id="codeCard" hidden>
+    <h1>📥 Тебе прислали файлы?</h1>
+    <p>Введи код из 9 цифр, который тебе продиктовали или прислали.</p>
+    <form id="codeForm" autocomplete="off">
+      <input id="codeInput" inputmode="numeric" maxlength="11" placeholder="123 456 789" aria-label="Код" autofocus>
+      <button class="btn primary block" type="submit">Открыть</button>
+    </form>
+  </section>
+
+  <!-- Пароль -->
+  <section class="g-card" id="pwCard" hidden>
+    <h1>🔒 Нужен пароль</h1>
+    <p id="pwText">Отправитель защитил файлы паролем. Спроси его — обычно пароль говорят голосом.</p>
+    <form id="pwForm" autocomplete="off">
+      <input id="pwInput" type="password" placeholder="Пароль" aria-label="Пароль">
+      <button class="btn primary block" type="submit">Открыть</button>
+    </form>
+  </section>
+
+  <!-- Файлы -->
+  <section class="g-card" id="filesCard" hidden>
+    <h1 id="filesTitle">Файлы для тебя</h1>
+    <p class="g-meta" id="filesMeta"></p>
+    <div class="g-list" id="filesList"></div>
+    <p class="g-note" id="filesNote"></p>
+  </section>
+
+  <!-- Ошибка -->
+  <section class="g-card" id="errorCard" hidden>
+    <h1>😕 Не нашлось</h1>
+    <p id="errorText"></p>
+    <a class="btn block" href="/get">Ввести код ещё раз</a>
+  </section>
+
+  <p class="g-foot">🔒 Файлы хранятся не дольше суток и потом удаляются автоматически.</p>
+</main>
+
+<script src="/static/chat.js"></script>
+<script src="/static/guest.js"></script>
+</body>
+</html>

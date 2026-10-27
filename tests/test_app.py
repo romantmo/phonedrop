@@ -960,3 +960,220 @@ def test_tools_on_unlinked_pc_are_closed(client):
     open_pc(lonely)  # QR показан, телефон не подключён
     r = lonely.post("/api/tools/images-jpg", files={"files": ("a.jpg", jpeg(), "image/jpeg")})
     assert r.status_code == 401
+
+
+# ------------------------------------------- передачи между компьютерами (v1.5)
+
+@pytest.fixture
+def two_pcs(client, pc, phone):
+    """Два моих компьютера (дом и офис), подключённых к одному телефону."""
+    pair(pc, phone)
+    office = Device(client, "pc")
+    pair(office, phone)
+    office_id = office.get("/api/state").json()["chat_id"]
+    return pc, office, office_id
+
+
+def put_chunk(dev, tid, offset, data):
+    return dev.request("PUT", f"/api/transfers/{tid}/data", params={"offset": offset}, content=data,
+                       headers={"Content-Type": "application/octet-stream"})
+
+
+def test_transfer_between_computers_with_resume(client, two_pcs, settings):
+    home, office, office_id = two_pcs
+    settings.transfer_chunk_mb = 1
+    data = bytes(range(256)) * 10_000  # ~2,5 МБ → 3 части
+    assert [d["id"] for d in home.get("/api/pc/devices").json()["devices"]] == [office_id]
+    t = home.post("/api/transfers", json={"name": "backup.zip", "size": len(data), "to": office_id}).json()
+    assert t["direction"] == "out" and not t["done"]
+    chunk = 1024 * 1024
+    assert put_chunk(home, t["id"], 0, data[:chunk]).json() == {"received": chunk, "done": False}
+    # «связь оборвалась»: клиент не знает, сколько дошло, и пробует не то место — сервер подсказывает
+    wrong = put_chunk(home, t["id"], 0, data[:chunk])
+    assert wrong.status_code == 409 and wrong.json()["received"] == chunk
+    assert office.get("/api/transfers").json()["incoming"] == []  # пока не догрузили — получатель не видит
+    put_chunk(home, t["id"], chunk, data[chunk:2 * chunk])
+    with office.ws() as ws:
+        ws.receive_json()  # presence
+        assert put_chunk(home, t["id"], 2 * chunk, data[2 * chunk:]).json()["done"] is True
+        assert ws.receive_json()["type"] == "transfers_changed"
+    incoming = office.get("/api/transfers").json()["incoming"]
+    assert [x["name"] for x in incoming] == ["backup.zip"]
+    full = office.get(incoming[0]["url"])
+    assert full.content == data and full.headers["content-disposition"].startswith("attachment")
+    # докачка при скачивании (Range)
+    part = office.get(incoming[0]["url"], headers={"Range": "bytes=1000-1999"})
+    assert part.status_code == 206 and part.content == data[1000:2000]
+
+
+def test_transfer_is_private_and_limited(client, two_pcs, settings):
+    home, office, office_id = two_pcs
+    stranger_pc = Device(client, "pc")
+    pair(stranger_pc, Device(client, "phone"))
+    # чужому компьютеру отправить нельзя
+    stranger_id = stranger_pc.get("/api/state").json()["chat_id"]
+    assert home.post("/api/transfers", json={"name": "a", "size": 10, "to": stranger_id}).status_code == 404
+    assert home.post("/api/transfers", json={"name": "a", "size": 10, "to": home.get("/api/state").json()["chat_id"]}).status_code == 404
+    t = home.post("/api/transfers", json={"name": "a.bin", "size": 3, "to": office_id}).json()
+    put_chunk(home, t["id"], 0, b"abc")
+    assert stranger_pc.get(f"/x/{t['id']}").status_code == 404
+    assert put_chunk(office, t["id"], 3, b"x").status_code == 403  # догружает только отправитель
+    # лимиты
+    settings.transfer_max_mb = 1
+    assert home.post("/api/transfers", json={"name": "big", "size": 2 * 1024 * 1024, "to": office_id}).status_code == 413
+    settings.transfer_max_mb = 100
+    settings.transfer_quota_mb = 1
+    assert home.post("/api/transfers", json={"name": "q", "size": 1024 * 1024, "to": office_id}).status_code == 507
+    # часть больше объявленного размера не принимается
+    t2 = home.post("/api/transfers", json={"name": "s", "size": 2, "to": office_id}).json()
+    assert put_chunk(home, t2["id"], 0, b"too long").status_code == 413
+
+
+def test_transfer_deleted_after_a_day(client, two_pcs):
+    home, office, office_id = two_pcs
+    t = home.post("/api/transfers", json={"name": "a.bin", "size": 3, "to": office_id}).json()
+    put_chunk(home, t["id"], 0, b"abc")
+    s = store(client)
+    s.run("UPDATE transfers SET created=created-?", s.settings.transfer_ttl_hours * 3600 + 1)
+    client.portal.call(s.cleanup)
+    assert office.get(f"/x/{t['id']}").status_code == 404
+    assert not any(s.transfers_root.iterdir())
+
+
+def test_transfer_manual_delete_and_receiver_removed(client, two_pcs, phone):
+    home, office, office_id = two_pcs
+    t = home.post("/api/transfers", json={"name": "a.bin", "size": 3, "to": office_id}).json()
+    put_chunk(home, t["id"], 0, b"abc")
+    assert office.delete(f"/api/transfers/{t['id']}").status_code == 200  # получатель тоже может удалить
+    assert home.get("/api/transfers").json()["outgoing"] == []
+    t = home.post("/api/transfers", json={"name": "b.bin", "size": 3, "to": office_id}).json()
+    phone.delete(f"/api/chats/{office_id}")  # офисный компьютер отключили — его файлы удаляются
+    assert not any(store(client).transfers_root.iterdir())
+
+
+# ------------------------------------------------ посылки «другому человеку»
+
+def upload_share_file(dev, sid, name, data):
+    f = dev.post(f"/api/shares/{sid}/files", json={"name": name, "size": len(data)}).json()
+    r = dev.request("PUT", f"/api/shares/{sid}/files/{f['id']}/data", params={"offset": 0}, content=data,
+                    headers={"Content-Type": "application/octet-stream"})
+    assert r.json()["done"] is True
+    return f
+
+
+def test_share_by_link_and_by_code(client, pc, phone):
+    pair(pc, phone)
+    r = phone.post("/api/shares", json={"hours": 24, "name": "Роман"})
+    assert r.status_code == 200, r.text
+    share = r.json()
+    link, code = share["link"], share["code"]
+    assert len(code.replace(" ", "")) == 9 and "/g/" in link
+    upload_share_file(phone, share["share"]["id"], "договор.pdf", b"%PDF-1.4 hello")
+    guest = Device(client, "guest")  # другой человек: никаких cookie, никакого QR
+    ref = link.rsplit("/g/", 1)[1]
+    info = guest.get(f"/api/g/{ref}").json()
+    assert info["owner_label"] == "Роман" and [f["name"] for f in info["files"]] == ["договор.pdf"]
+    got = guest.get(info["files"][0]["url"])
+    assert got.content == b"%PDF-1.4 hello" and got.headers["content-disposition"].startswith("attachment")
+    assert got.headers["content-security-policy"] == "sandbox"
+    # по коду, продиктованному по телефону
+    r = Device(client, "guest").post("/api/get/code", json={"code": code.replace(" ", "-")})
+    assert r.status_code == 200
+    by_code = guest.get(f"/api/g/{r.json()['ref']}").json()
+    assert by_code["files"][0]["name"] == "договор.pdf"
+    # отправитель видит, что скачали
+    assert phone.get("/api/shares").json()["shares"][0]["files"][0]["downloads"] == 1
+
+
+def test_share_password_once_and_notify(client, pc, phone):
+    pair(pc, phone)
+    sub = {"endpoint": "https://push.example/me", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+    pc.post("/api/push/subscribe", json=sub)
+    share = pc.post("/api/shares", json={"hours": 1, "password": "кот2026", "once": True, "notify": True}).json()
+    upload_share_file(pc, share["share"]["id"], "photo.jpg", b"jpeg-bytes")
+    ref = share["link"].rsplit("/g/", 1)[1]
+    guest = Device(client, "guest")
+    locked = guest.get(f"/api/g/{ref}")
+    assert locked.status_code == 401 and locked.json()["password"] is True
+    assert guest.get(f"/g/{ref}/anything").status_code == 403
+    assert guest.post(f"/api/g/{ref}/unlock", json={"password": "неверный"}).status_code == 403
+    assert guest.post(f"/api/g/{ref}/unlock", json={"password": "кот2026"}).status_code == 200
+    files = guest.get(f"/api/g/{ref}").json()["files"]
+    assert guest.get(files[0]["url"]).content == b"jpeg-bytes"
+    # «удалить после скачивания»: файла и посылки больше нет
+    assert guest.get(files[0]["url"]).status_code == 404
+    assert pc.get("/api/shares").json()["shares"] == []
+    assert not any(store(client).transfers_root.iterdir())
+    client.portal.call(store(client).flush_push)
+    assert "photo.jpg" in dict(client.pusher.sent)["https://push.example/me"]
+
+
+def test_share_code_bruteforce_is_limited(client, pc, phone):
+    pair(pc, phone)
+    guest = Device(client, "guest")
+    for i in range(10):
+        assert guest.post("/api/get/code", json={"code": f"{i:09d}"}).status_code == 404
+    assert guest.post("/api/get/code", json={"code": "123456789"}).status_code == 429
+
+
+def test_share_password_bruteforce_is_limited(client, pc, phone):
+    pair(pc, phone)
+    share = pc.post("/api/shares", json={"password": "secret1"}).json()
+    ref = share["link"].rsplit("/g/", 1)[1]
+    guest = Device(client, "guest")
+    for _ in range(5):
+        assert guest.post(f"/api/g/{ref}/unlock", json={"password": "nope"}).status_code == 403
+    assert guest.post(f"/api/g/{ref}/unlock", json={"password": "secret1"}).status_code == 429
+
+
+def test_share_expires_and_rotate(client, pc, phone):
+    pair(pc, phone)
+    share = pc.post("/api/shares", json={"hours": 6}).json()
+    sid = share["share"]["id"]
+    upload_share_file(pc, sid, "a.txt", b"abc")
+    old_ref = share["link"].rsplit("/g/", 1)[1]
+    new = pc.post(f"/api/shares/{sid}/rotate").json()
+    guest = Device(client, "guest")
+    assert guest.get(f"/api/g/{old_ref}").status_code == 404  # старая ссылка погасла
+    assert guest.post("/api/get/code", json={"code": share["code"]}).status_code == 404
+    new_ref = new["link"].rsplit("/g/", 1)[1]
+    assert guest.get(f"/api/g/{new_ref}").status_code == 200
+    s = store(client)
+    s.run("UPDATE shares SET expires=?", time.time() - 1)
+    client.portal.call(s.cleanup)
+    assert guest.get(f"/api/g/{new_ref}").status_code == 404
+    assert not any(s.transfers_root.iterdir())
+
+
+def test_share_is_private_to_owner_account(client, pc, phone):
+    pair(pc, phone)
+    share = pc.post("/api/shares", json={}).json()
+    sid = share["share"]["id"]
+    stranger = Device(client, "phone")
+    pair(Device(client, "pc"), stranger)
+    assert stranger.post(f"/api/shares/{sid}/files", json={"name": "x", "size": 1}).status_code == 404
+    assert stranger.delete(f"/api/shares/{sid}").status_code == 404
+    assert phone.get("/api/shares").json()["shares"][0]["id"] == sid  # телефон видит посылки своего компьютера
+    assert Device(client, "guest").post("/api/shares", json={}).status_code == 400  # без X-PD-Role и входа — нельзя
+
+
+def test_share_download_range(client, pc, phone):
+    pair(pc, phone)
+    share = pc.post("/api/shares", json={}).json()
+    data = bytes(range(256)) * 100
+    upload_share_file(pc, share["share"]["id"], "big.bin", data)
+    ref = share["link"].rsplit("/g/", 1)[1]
+    guest = Device(client, "guest")
+    url = guest.get(f"/api/g/{ref}").json()["files"][0]["url"]
+    part = guest.get(url, headers={"Range": "bytes=100-199"})
+    assert part.status_code == 206 and part.content == data[100:200]
+    assert part.headers["content-range"] == f"bytes 100-199/{len(data)}"
+    assert guest.get(url, headers={"Range": "bytes=99999-"}).status_code == 416
+
+
+def test_guest_pages_are_public_and_safe(client):
+    for url in ("/get", "/g/whatever"):
+        r = client.get(url)
+        assert r.status_code == 200 and "<script>" not in r.text
+        assert "script-src 'self'" in r.headers["content-security-policy"]
+        assert r.headers["referrer-policy"] == "no-referrer"  # ключ из ссылки не утечёт на другие сайты

@@ -19,8 +19,9 @@
   <aside class="side">
     <div class="brand"><img src="/static/icons/icon-192.png" alt="">PhoneDrop</div>
     <nav class="tabs" id="tabs" role="tablist" hidden>
-      <button type="button" role="tab" id="tabChat" class="on" aria-selected="true">💬 Чат</button>
-      <button type="button" role="tab" id="tabTools" aria-selected="false">🛠 Инструменты</button>
+      <button type="button" role="tab" id="tabChat" class="on" aria-selected="true"><span class="ti">💬</span>Чат</button>
+      <button type="button" role="tab" id="tabTools" aria-selected="false"><span class="ti">🛠</span>Инструменты</button>
+      <button type="button" role="tab" id="tabTransfers" aria-selected="false"><span class="ti">📦</span>Передачи<span class="tab-dot" id="trDot" hidden></span></button>
     </nav>
 
     <section class="card pair" id="pairBox" hidden>
@@ -28,6 +29,7 @@
       <h2>Отсканируй камерой телефона</h2>
       <p>Код одноразовый — после сканирования он сгорает.</p>
       <p class="expires" id="pairExpires"></p>
+      <a class="btn block get-link" href="/get">📥 Мне прислали код — получить файлы</a>
       <p class="pair-tip">Уже переписывался с этим компьютером, но вход слетел? На телефоне открой его чат → ⋮ → <b>«Переподключить компьютер»</b> — переписка вернётся.</p>
     </section>
 
@@ -107,6 +109,45 @@
     <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить на телефон</div>
   </main>
 
+  <!-- ===== Передачи: большие файлы между моими компьютерами ===== -->
+  <main class="tools-main" id="transfersMain" hidden>
+    <header class="chat-head">
+      <div class="avatar tool-ico">📦</div>
+      <div class="who">
+        <div class="name">Передачи между компьютерами</div>
+        <div class="status">До 10 ГБ, хоть на другой континент. Хранятся не дольше суток</div>
+      </div>
+    </header>
+    <div class="tr-switch seg">
+      <button type="button" id="trModeMine" class="on">💻 Мои компьютеры</button>
+      <button type="button" id="trModeShare">🌍 Другому человеку</button>
+    </div>
+    <div class="tr-body" id="shareBody" hidden></div>
+    <div class="tr-body" id="mineBody">
+      <section class="tr-card">
+        <h3>Отправить</h3>
+        <div class="tr-drop" id="trDrop">
+          <span>📂 Перетащи файлы сюда</span>
+          <button class="btn" id="trPick" type="button">или выбери на компьютере</button>
+          <input type="file" id="trInput" multiple hidden>
+        </div>
+        <div class="tr-list" id="trPicked"></div>
+        <h4>Кому</h4>
+        <div class="tr-targets" id="trTargets"></div>
+        <button class="btn primary" id="trSend" type="button" disabled>Отправить</button>
+        <p class="tr-limits" id="trLimits"></p>
+      </section>
+      <section class="tr-card">
+        <h3>📥 Входящие</h3>
+        <div class="tr-list" id="trIn"></div>
+      </section>
+      <section class="tr-card">
+        <h3>📤 Отправленные</h3>
+        <div class="tr-list" id="trOut"></div>
+      </section>
+    </div>
+  </main>
+
   <!-- ===== Инструменты: сканер и конвертеры ===== -->
   <main class="tools-main" id="toolsMain" hidden>
     <header class="chat-head">
@@ -132,6 +173,7 @@
       <input type="file" id="toolPickInput" hidden>
       <div class="seg" id="toolOptions" hidden></div>
       <div class="scan-settings" id="scanSettings" hidden></div>
+      <div class="share-box" id="shareBox" hidden></div>
       <div class="tool-results" id="toolResults" hidden>
         <h3>Готово ✅</h3>
         <div class="tool-results-list" id="toolResultsList"></div>
@@ -142,7 +184,7 @@
         <p class="tool-note" id="toolNote"></p>
       </div>
     </div>
-    <footer class="tool-foot">
+    <footer class="tool-foot" id="toolFoot">
       <div class="progress" id="toolProgress" hidden><div></div></div>
       <button class="btn primary block" id="toolRun" type="button" disabled>Сделать PDF</button>
     </footer>
@@ -198,8 +240,11 @@
   </div>
 </div>
 <script src="/static/chat.js"></script>
+<script src="/static/uploader.js"></script>
+<script src="/static/shares.js"></script>
 <script src="/static/scanner.js"></script>
 <script src="/static/tools.js"></script>
+<script src="/static/transfers.js"></script>
 <script src="/static/desktop.js"></script>
 </body>
 </html>

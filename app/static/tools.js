@@ -20,6 +20,11 @@ window.PDTools = (() => {
       action: "Сделать PDF",
     },
     {
+      id: "share", custom: "share", phoneOnly: true, icon: "🌍", title: "Отправить по ссылке",
+      sub: "Человеку в любой стране — ссылка или код",
+      hint: "Файлы до 10 ГБ. Получатель откроет ссылку или введёт код на сайте — без регистрации.",
+    },
+    {
       id: "office", op: "office-pdf", icon: "📄", title: "Документ → PDF",
       sub: "Word, Excel, PowerPoint",
       hint: "Выбери файл Word, Excel или PowerPoint — получишь PDF, который откроется на любом устройстве.",
@@ -67,7 +72,7 @@ window.PDTools = (() => {
   // ---------- главный экран инструментов
   function renderHome(container, onOpen) {
     container.replaceChildren(
-      el("div", { class: "tools-grid" }, ...TOOLS.map((t) =>
+      el("div", { class: "tools-grid" }, ...TOOLS.filter((t) => !(t.phoneOnly && ON_PC)).map((t) =>
         el("button", { class: "tool-card", type: "button", onclick: () => onOpen(t.id) },
           el("span", { class: "tool-emoji" }, t.icon),
           el("b", {}, t.title),
@@ -95,11 +100,16 @@ window.PDTools = (() => {
     $("toolTitle").textContent = tool.title;
     $("toolSub").textContent = tool.sub;
     $("toolHint").textContent = tool.hint + (ON_PC ? " Файлы можно перетащить мышкой в это окно или вставить Ctrl+V." : "");
+    // «Посылка» — свой экран (shares.js), обычные части инструмента прячем.
+    const custom = !!tool.custom;
+    for (const id of ["toolFiles", "toolAdd", "toolFoot"]) $(id).hidden = custom;
+    $("shareBox").hidden = !custom;
+    if (custom) { PDShares.mount($("shareBox")); }
     $("toolCamera").hidden = !tool.camera || ON_PC;
     $("toolPick").textContent = tool.camera && !ON_PC ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
     $("toolSendPc").textContent = ON_PC ? "📱 На телефон" : "💻 На компьютер";
     const pick = $("toolPickInput");
-    pick.accept = tool.accept;
+    pick.accept = tool.accept || "";
     pick.multiple = tool.multi;
     $("toolRun").textContent = tool.action;
     $("scanSettings").hidden = !tool.scanner;

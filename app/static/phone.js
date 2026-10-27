@@ -190,6 +190,8 @@
       reloadSoon();
     } else if (msg.type === "chats_changed") {
       reloadSoon();
+    } else if (msg.type === "shares_changed") {
+      PDShares.refresh();  // кто-то скачал файл из посылки
     }
   }
 

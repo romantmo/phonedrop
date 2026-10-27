@@ -258,3 +258,58 @@
 .ed-note { margin: 6px 0 0; font-size: 12px; color: rgba(255, 255, 255, .5); text-align: center; }
 .crop-box img, .ed-result { max-height: calc(100dvh - 300px); }
 .gate-tip { margin: 16px 0 0; font-size: 14px; color: var(--muted); }
+
+/* ---------- посылки «другому человеку» (телефон и компьютер) */
+.share-box { display: flex; flex-direction: column; gap: 14px; }
+.sh-intro { margin: 0; color: var(--muted); font-size: 15px; }
+.sh-card {
+  padding: 16px; border-radius: 18px; background: var(--panel); box-shadow: var(--shadow);
+  border: 1px solid var(--line); animation: rise .3s ease both;
+}
+.sh-card.fresh { border: 2px solid var(--accent); }
+.sh-card h3 { margin: 0 0 12px; font-size: 18px; }
+.sh-card h4 { margin: 14px 0 8px; font-size: 15px; color: var(--muted); }
+.sh-card input[type=text] {
+  width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel-2); color: var(--ink); font: inherit; font-size: 16px;
+}
+.sh-drop {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px;
+  border: 2px dashed var(--line); border-radius: 16px; color: var(--muted); transition: border-color .2s, background .2s;
+}
+.sh-drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.sh-check { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 15px; cursor: pointer; }
+.sh-check input { width: 20px; height: 20px; accent-color: var(--accent); }
+.sh-create { margin-top: 16px; }
+.sh-create:disabled { opacity: .5; box-shadow: none; }
+.sh-limits { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.sh-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.sh-badges span { padding: 3px 10px; border-radius: 12px; background: var(--panel-2); font-size: 13px; color: var(--muted); }
+.sh-code {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px;
+  background: var(--accent-soft); flex-wrap: wrap;
+}
+.sh-code small { color: var(--accent); font-weight: 700; }
+.sh-code b { flex: 1; font-size: 26px; letter-spacing: 3px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sh-code.big b { font-size: 34px; }
+.sh-code .btn, .sh-link .btn { min-height: 40px; padding: 0 14px; font-size: 14px; }
+.sh-link { display: flex; gap: 8px; margin-top: 10px; }
+.sh-link input { flex: 1; min-width: 0; font-size: 14px !important; }
+.sh-say { margin: 10px 0 0; font-size: 15px; color: var(--muted); }
+.sh-say b { color: var(--ink); }
+.sh-files { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.sh-file { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--panel-2); }
+.sh-finfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sh-finfo b { overflow-wrap: anywhere; font-size: 15px; }
+.sh-finfo small { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.sh-finfo .progress { margin-top: 6px; height: 7px; }
+.sh-bar { height: 100%; width: 0; background: var(--grad); border-radius: 4px; transition: width .4s ease; }
+.sh-factions { display: flex; gap: 4px; }
+.sh-mini {
+  width: 38px; height: 38px; border: 0; border-radius: 10px; background: var(--panel);
+  font-size: 16px; color: var(--ink); cursor: pointer;
+}
+.sh-mini.danger { color: var(--danger); }
+.sh-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.sh-actions .btn { min-height: 40px; font-size: 14px; }
+.sh-empty { margin: 0; color: var(--muted); font-size: 14px; }
