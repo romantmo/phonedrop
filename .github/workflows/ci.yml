@@ -79,6 +79,22 @@ jobs:
           docker logs check
           exit 1
 
+      - name: Проверить конвертер (Word → PDF внутри «коробки»)
+        run: |
+          docker run -d --name conv -p 8001:8001 phonedrop:check \
+            uvicorn converter.main:app --host 0.0.0.0 --port 8001
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8001/healthz | grep -q '"office":true' && break
+            sleep 1
+          done
+          curl -fsS -F "files=@tests/fixtures/sample.docx" http://127.0.0.1:8001/convert/office-pdf -o result.zip
+          python3 -c "
+          import zipfile
+          data = zipfile.ZipFile('result.zip').read('000.pdf')
+          assert data.startswith(b'%PDF'), 'это не PDF'
+          print('Word → PDF работает, размер PDF:', len(data), 'байт')
+          "
+
       - name: Войти в хранилище образов GitHub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4

@@ -36,12 +36,18 @@
       <button type="button" id="menuPush">🔔 Уведомления</button>
     </nav>
 
+    <div class="tabs" id="tabs" role="tablist" hidden>
+      <button type="button" role="tab" id="tabChats" class="on" aria-selected="true">💻 Компьютеры</button>
+      <button type="button" role="tab" id="tabTools" aria-selected="false">🛠 Инструменты</button>
+    </div>
+
     <div class="banner" id="pushBanner" hidden>
       <span>🔔 Включи уведомления, чтобы не пропускать сообщения с компьютера</span>
       <button class="btn primary" id="pushBannerBtn" type="button">Включить</button>
     </div>
 
     <div class="chat-list" id="chatList"></div>
+    <div class="tools-home" id="toolsHome" hidden></div>
 
     <div class="gate" id="gate" hidden>
       <div class="card">
@@ -56,6 +62,44 @@
     <button class="fab" id="fabScan" type="button" aria-label="Подключить компьютер" title="Подключить компьютер" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h7v7H3V3zm2 2v3h3V5H5zm9-2h7v7h-7V3zm2 2v3h3V5h-3zM3 14h7v7H3v-7zm2 2v3h3v-3H5zm9-2h2v2h-2v-2zm2 2h2v2h-2v-2zm2-2h3v2h-3v-2zm-4 4h2v3h-2v-3zm4 0h3v3h-2v-1h-1v-2z"/></svg>
     </button>
+  </section>
+
+  <!-- ===== Инструмент (сканер, конвертеры) ===== -->
+  <section class="view" id="toolView" hidden>
+    <header class="chat-head">
+      <button class="icon-btn" id="toolBack" type="button" aria-label="Назад">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+      </button>
+      <div class="avatar tool-ico" id="toolIcon"></div>
+      <div class="who">
+        <div class="name" id="toolTitle"></div>
+        <div class="status" id="toolSub"></div>
+      </div>
+    </header>
+    <div class="tool-body" id="toolBody">
+      <p class="tool-hint" id="toolHint"></p>
+      <div class="tool-files" id="toolFiles"></div>
+      <div class="tool-add" id="toolAdd">
+        <button class="btn" id="toolCamera" type="button">📷 Снять страницу</button>
+        <button class="btn" id="toolPick" type="button">🖼 Выбрать файлы</button>
+      </div>
+      <input type="file" id="toolCameraInput" accept="image/*" capture="environment" hidden>
+      <input type="file" id="toolPickInput" hidden>
+      <div class="seg" id="toolOptions" hidden></div>
+      <div class="tool-results" id="toolResults" hidden>
+        <h3>Готово ✅</h3>
+        <div class="tool-results-list" id="toolResultsList"></div>
+        <div class="tool-results-actions">
+          <button class="btn primary" id="toolShareAll" type="button">📤 Поделиться</button>
+          <button class="btn" id="toolSendPc" type="button">💻 На компьютер</button>
+        </div>
+        <p class="tool-note" id="toolNote"></p>
+      </div>
+    </div>
+    <footer class="tool-foot">
+      <div class="progress" id="toolProgress" hidden><div></div></div>
+      <button class="btn primary block" id="toolRun" type="button" disabled>Сделать PDF</button>
+    </footer>
   </section>
 
   <!-- ===== Открытый чат ===== -->
@@ -120,6 +164,7 @@
 </div>
 
 <script src="/static/chat.js"></script>
+<script src="/static/tools.js"></script>
 <script src="/static/phone.js"></script>
 </body>
 </html>

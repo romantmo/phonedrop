@@ -7,8 +7,18 @@
 
 import time
 
+import io
+import shutil
+import zipfile
+from pathlib import Path
+
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
+from pypdf import PdfReader
+
+from converter.main import app as converter_app
 
 from app.main import MAX_DEVICES, STATIC_DIR, Settings, create_app
 
@@ -92,6 +102,8 @@ def client(settings):
     with TestClient(create_app(settings), base_url=BASE) as c:
         c.pusher = Pusher()
         c.app.state.store.push_sender = c.pusher
+        # Конвертер в тестах работает «в памяти», без отдельного контейнера.
+        c.app.state.store.converter_transport = httpx.ASGITransport(app=converter_app)
         yield c
 
 
@@ -548,6 +560,29 @@ def test_dangerous_files_never_open_in_browser(pc, phone):
         assert r.headers["content-security-policy"] == "sandbox"
 
 
+def test_files_open_in_browser_safely(pc, phone):
+    """PDF открывается во встроенном просмотрщике, остальное — в «песочнице»."""
+    chat_id = pair(pc, phone)
+    sent = {}
+    for name, mime in (("a.pdf", "application/pdf"), ("b.png", "image/png"), ("c.txt", "text/plain"),
+                       ("d.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")):
+        sent[name] = phone.post("/api/send", data={"chat_id": chat_id},
+                                files={"files": (name, b"data", mime)}).json()["messages"][0]
+    assert [sent[n]["viewable"] for n in sent] == [True, True, True, False]
+
+    pdf = pc.get(sent["a.pdf"]["url"])
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.headers["content-disposition"].startswith("inline")
+    assert "content-security-policy" not in pdf.headers  # иначе Chrome не покажет PDF
+    assert pdf.headers["x-content-type-options"] == "nosniff"
+    assert pdf.headers["x-frame-options"] == "DENY"
+    assert pdf.headers["cache-control"] == "no-store"
+
+    for n in ("b.png", "c.txt", "d.docx"):
+        assert pc.get(sent[n]["url"]).headers["content-security-policy"] == "sandbox", n
+    assert pc.get(sent["d.docx"]["url"]).headers["content-disposition"].startswith("attachment")
+
+
 def test_path_traversal_in_filename_is_harmless(pc, phone, tmp_path):
     pair(pc, phone)
     for evil in ("../../etc/passwd", "..\\..\\windows\\win.ini"):
@@ -607,3 +642,155 @@ def test_max_computers_per_phone(client, phone):
     for i in range(MAX_DEVICES + 1):
         status = phone.post(f"/api/pair/{code_of(open_pc(Device(client, 'pc')))}").status_code
         assert status == (200 if i < MAX_DEVICES else 409)
+
+
+# ------------------------------------------------------------------ инструменты
+
+FIXTURES = Path(__file__).parent / "fixtures"
+has_office = bool(shutil.which("soffice") or shutil.which("libreoffice"))
+needs_office = pytest.mark.skipif(not has_office, reason="LibreOffice не установлен (проверяется в Docker-образе)")
+
+
+def jpeg(color="red", size=(640, 480)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+def test_scanner_makes_pdf_on_phone_without_pc_online(pc, phone):
+    pair(pc, phone)
+    r = phone.post("/api/tools/images-pdf", data={"mode": "doc", "rotations": "90,0", "name": "Счёт"},
+                   files=[("files", ("1.jpg", jpeg(), "image/jpeg")), ("files", ("2.jpg", jpeg("blue"), "image/jpeg"))])
+    assert r.status_code == 200, r.text
+    (res,) = r.json()["results"]
+    assert (res["name"], res["mime"]) == ("Счёт.pdf", "application/pdf")
+    got = phone.get(res["url"])
+    assert len(PdfReader(io.BytesIO(got.content)).pages) == 2
+    assert got.headers["content-disposition"].startswith("inline")
+    assert phone.get(res["download_url"]).headers["content-disposition"].startswith("attachment")
+
+
+def test_tool_results_are_private(client, pc, phone):
+    pair(pc, phone)
+    res = phone.post("/api/tools/images-jpg", data={"preset": "small"},
+                     files={"files": ("big.jpg", jpeg(size=(3000, 2000)), "image/jpeg")}).json()["results"][0]
+    assert Image.open(io.BytesIO(phone.get(res["url"]).content)).size == (1280, 853)
+    stranger = Device(client, "phone")
+    other_pc = Device(client, "pc")
+    pair(other_pc, stranger)
+    assert stranger.get(res["url"]).status_code == 404
+    assert pc.get(res["url"]).status_code == 404  # даже свой компьютер не видит, пока не отправили в чат
+    assert Device(client, "phone").post("/api/tools/images-jpg",
+                                        files={"files": ("a.jpg", jpeg(), "image/jpeg")}).status_code == 401
+
+
+def test_tool_results_expire(client, pc, phone):
+    pair(pc, phone)
+    res = phone.post("/api/tools/images-jpg", files={"files": ("a.jpg", jpeg(), "image/jpeg")}).json()["results"][0]
+    s = store(client)
+    s.run("UPDATE tool_results SET created=created-?", s.settings.tool_ttl_min * 60 + 1)
+    client.portal.call(s.cleanup)
+    assert phone.get(res["url"]).status_code == 404
+    assert not any(s.tools_root.iterdir())
+
+
+def test_send_tool_result_to_computer(pc, phone):
+    chat_id = pair(pc, phone)
+    a = phone.post("/api/tools/pdf-images", files={"files": ("doc.pdf", make_pdf_bytes(2), "application/pdf")})
+    results = a.json()["results"]
+    assert [r["name"] for r in results] == ["doc — стр. 1.jpg", "doc — стр. 2.jpg"]
+    r = phone.post("/api/tools/send", json={"ids": [x["id"] for x in results], "chat_id": chat_id})
+    assert r.status_code == 200, r.text
+    names = [m["name"] for m in pc.get("/api/state").json()["messages"]]
+    assert names == ["doc — стр. 1.jpg", "doc — стр. 2.jpg"]
+    # чужие id отправить нельзя
+    assert phone.post("/api/tools/send", json={"ids": ["0" * 32], "chat_id": chat_id}).status_code == 404
+
+
+def make_pdf_bytes(pages: int) -> bytes:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=595, height=842)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def test_merge_pdfs_tool(pc, phone):
+    pair(pc, phone)
+    r = phone.post("/api/tools/merge-pdf", files=[("files", ("a.pdf", make_pdf_bytes(1), "application/pdf")),
+                                                  ("files", ("b.pdf", make_pdf_bytes(2), "application/pdf"))])
+    (res,) = r.json()["results"]
+    assert res["name"] == "a (объединённый).pdf"
+    assert len(PdfReader(io.BytesIO(phone.get(res["url"]).content)).pages) == 3
+
+
+def test_tools_check_inputs(pc, phone):
+    pair(pc, phone)
+    svg = ("files", ("x.svg", b"<svg onload=alert(1)>", "image/svg+xml"))
+    assert phone.post("/api/tools/images-pdf", files=[svg]).status_code == 400
+    assert phone.post("/api/tools/office-pdf", files={"files": ("x.exe", b"MZ", "application/x-msdownload")}).status_code == 400
+    assert phone.post("/api/tools/merge-pdf", files={"files": ("a.pdf", b"%PDF", "application/pdf")}).status_code == 400
+    assert phone.post("/api/tools/format-disk", files=[svg]).status_code == 404
+    broken = phone.post("/api/tools/pdf-images", files={"files": ("a.pdf", b"not a pdf", "application/pdf")})
+    assert broken.status_code == 422 and "PDF" in broken.json()["detail"]
+
+
+def test_converter_down_gives_clear_error(client, pc, phone):
+    pair(pc, phone)
+
+    def fail(request):
+        raise httpx.ConnectError("down")
+
+    store(client).converter_transport = httpx.MockTransport(fail)
+    r = phone.post("/api/tools/images-jpg", files={"files": ("a.jpg", jpeg(), "image/jpeg")})
+    assert r.status_code == 503 and "недоступен" in r.json()["detail"]
+    assert not any(store(client).tmp_root.iterdir())  # временные файлы убраны
+
+
+def test_heic_in_chat_converts_to_jpg(pc, phone):
+    chat_id = pair(pc, phone)
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 200), "green").save(buf, "HEIF")
+    m = phone.post("/api/send", data={"chat_id": chat_id},
+                   files={"files": ("IMG_1.HEIC", buf.getvalue(), "image/heic")}).json()["messages"][0]
+    assert m["convert_to"] == "jpg" and "preview_url" not in m
+    r = pc.post(f"/api/messages/{m['id']}/convert")
+    assert r.status_code == 200, r.text
+    (new,) = r.json()["messages"]
+    assert (new["name"], new["mime"], new["sender"]) == ("IMG_1.jpg", "image/jpeg", "pc")
+
+
+@needs_office
+def test_word_preview_and_convert_in_chat(client, pc, phone):
+    chat_id = pair(pc, phone)
+    docx = (FIXTURES / "sample.docx").read_bytes()
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    m = phone.post("/api/send", data={"chat_id": chat_id},
+                   files={"files": ("Договор.docx", docx, mime)}).json()["messages"][0]
+    assert m["convert_to"] == "pdf" and m["viewable"] is False
+    prev = pc.get(m["preview_url"])
+    assert prev.status_code == 200 and prev.content.startswith(b"%PDF")
+    assert prev.headers["content-type"] == "application/pdf"
+    assert "content-security-policy" not in prev.headers
+    assert pc.get(m["preview_url"]).content == prev.content  # второй раз — из кэша
+    # чужой не увидит
+    stranger = Device(client, "phone")
+    pair(Device(client, "pc"), stranger)
+    assert stranger.get(m["preview_url"]).status_code == 404
+    new = pc.post(f"/api/messages/{m['id']}/convert").json()["messages"][0]
+    assert new["name"] == "Договор.pdf"
+    # удалили документ — удалилось и превью
+    phone.delete(f"/api/messages/{m['id']}")
+    assert not store(client).preview_path(chat_id, m["id"]).exists()
+
+
+@needs_office
+def test_office_tool_on_phone(pc, phone):
+    pair(pc, phone)
+    xlsx = (FIXTURES / "sample.xlsx").read_bytes()
+    r = phone.post("/api/tools/office-pdf", files={"files": ("Отчёт.xlsx", xlsx, "application/octet-stream")})
+    assert r.status_code == 200, r.text
+    assert r.json()["results"][0]["name"] == "Отчёт.pdf"

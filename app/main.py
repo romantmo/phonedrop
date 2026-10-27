@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -26,19 +27,21 @@ import shutil
 import sqlite3
 import time
 import uuid
+import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import UploadFile
+from starlette.datastructures import Headers, UploadFile
 
 STATIC_DIR = Path(__file__).parent / "static"
 PC_COOKIE = "pd_pc"
@@ -64,6 +67,61 @@ INLINE_SAFE_TYPES = {
     "application/pdf",
     "text/plain",
 }
+
+
+def viewable(mime: str | None) -> bool:
+    """Можно ли открыть файл прямо в браузере (а не только скачать)."""
+    mime = mime or ""
+    return mime in INLINE_SAFE_TYPES or mime.startswith(INLINE_SAFE_PREFIXES)
+
+
+# Как защищаем открытый файл. Обычно — «песочница»: даже если в файле спрятан скрипт,
+# он не запустится и не получит доступ к сайту. Но встроенный просмотрщик PDF в Chrome
+# в песочнице не работает, поэтому PDF отдаём без неё. Это безопасно: PDF не может
+# стать веб-страницей (точный тип + nosniff), а его собственные скрипты браузер
+# выполняет отдельно от сайта, без доступа к cookie и нашим API.
+def file_csp(mime: str) -> str | None:
+    return None if mime == "application/pdf" else "sandbox"
+
+
+# ------------------------------------------------------------ конвертация
+# Документы, которые конвертер умеет превращать в PDF (через LibreOffice).
+OFFICE_EXTS = {
+    "doc", "docx", "docm", "odt", "rtf",
+    "xls", "xlsx", "xlsm", "ods", "csv",
+    "ppt", "pptx", "pps", "ppsx", "odp",
+}
+HEIC_EXTS = {"heic", "heif"}
+IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "avif"} | HEIC_EXTS
+TOOL_OPS = ("office-pdf", "images-pdf", "merge-pdf", "pdf-images", "images-jpg")
+
+
+def file_ext(name: str | None) -> str:
+    return Path(name or "").suffix.lower().lstrip(".")
+
+
+def stem(name: str | None) -> str:
+    return Path(name or "file").stem or "file"
+
+
+def is_image(name: str | None, mime: str | None) -> bool:
+    if mime == "image/svg+xml" or file_ext(name) == "svg":
+        return False  # SVG — это код, а не фото
+    return (mime or "").startswith("image/") or file_ext(name) in IMAGE_EXTS
+
+
+def is_pdf(name: str | None, mime: str | None) -> bool:
+    return mime == "application/pdf" or file_ext(name) == "pdf"
+
+
+def convert_to(name: str | None, mime: str | None) -> str | None:
+    """Во что можно превратить файл прямо в чате: Word/Excel/PowerPoint → PDF, HEIC → JPG."""
+    ext = file_ext(name)
+    if ext in OFFICE_EXTS:
+        return "pdf"
+    if ext in HEIC_EXTS or mime in ("image/heic", "image/heif"):
+        return "jpg"
+    return None
 
 # Content-Security-Policy: браузер выполняет только наши скрипты и стили с этого же сайта.
 # Даже если кто-то пришлёт в чат текст со скриптом, он не запустится.
@@ -117,6 +175,15 @@ CREATE TABLE IF NOT EXISTS push_subs (
     created  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS push_by_owner ON push_subs(owner);
+CREATE TABLE IF NOT EXISTS tool_results (
+    id      TEXT PRIMARY KEY,
+    owner   TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    mime    TEXT NOT NULL,
+    size    INTEGER NOT NULL,
+    created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tool_results_by_owner ON tool_results(owner, created);
 """
 
 
@@ -150,6 +217,11 @@ class Settings:
     sends_per_min: int = field(default_factory=lambda: _env_int("SENDS_PER_MIN", 120))
     vapid_subject: str = field(default_factory=lambda: os.getenv("VAPID_SUBJECT", ""))
     cleanup_interval_sec: int = field(default_factory=lambda: _env_int("CLEANUP_INTERVAL_SEC", 30))
+    # Конвертер — отдельный контейнер во внутренней сети (см. converter/main.py).
+    converter_url: str = field(default_factory=lambda: os.getenv("CONVERTER_URL", "http://converter:8001"))
+    tool_max_mb: int = field(default_factory=lambda: _env_int("TOOL_MAX_MB", 100))
+    tool_ttl_min: int = field(default_factory=lambda: _env_int("TOOL_TTL_MIN", 30))
+    tools_per_min: int = field(default_factory=lambda: _env_int("TOOLS_PER_MIN", 20))
 
 
 class PushGone(Exception):
@@ -165,6 +237,10 @@ class Store:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.files_root = settings.data_dir / "files"
+        self.tools_root = settings.data_dir / "tools"  # результаты инструментов (живут 30 минут)
+        self.tmp_root = settings.data_dir / "tmp"
+        self.converter_transport = None  # в тестах сюда подставляется конвертер «в памяти»
+        self.preview_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.db: sqlite3.Connection | None = None
         self.pc_sockets: dict[str, set[WebSocket]] = defaultdict(set)  # компьютер -> соединения
         self.phone_sockets: dict[str, set[WebSocket]] = defaultdict(set)  # аккаунт -> соединения
@@ -177,6 +253,9 @@ class Store:
     def open(self) -> None:
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
         self.files_root.mkdir(parents=True, exist_ok=True)
+        self.tools_root.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(self.tmp_root, ignore_errors=True)  # остатки прерванных конвертаций
+        self.tmp_root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(
             self.settings.data_dir / "phonedrop.db", check_same_thread=False, isolation_level=None
         )
@@ -299,7 +378,13 @@ class Store:
         if row["expired"]:
             data["expired"] = True
         else:
-            data.update(url=f"/f/{row['id']}", download_url=f"/f/{row['id']}?dl=1")
+            data.update(url=f"/f/{row['id']}", download_url=f"/f/{row['id']}?dl=1",
+                        viewable=viewable(row["mime"]))
+            target = convert_to(row["name"], row["mime"])
+            if target:
+                data["convert_to"] = target
+            if target == "pdf":
+                data["preview_url"] = f"/f/{row['id']}/preview"
         return data
 
     def messages(self, device_id: str) -> list[dict]:
@@ -312,9 +397,24 @@ class Store:
     def file_path(self, device_id: str, mid: str) -> Path:
         return self.files_root / device_id / mid
 
+    def preview_path(self, device_id: str, mid: str) -> Path:
+        return self.files_root / device_id / f"{mid}.preview.pdf"
+
+    def remove_file(self, row: sqlite3.Row) -> None:
+        self.file_path(row["device_id"], row["id"]).unlink(missing_ok=True)
+        self.preview_path(row["device_id"], row["id"]).unlink(missing_ok=True)
+
+    def tool_path(self, rid: str) -> Path:
+        return self.tools_root / rid
+
+    def tool_public(self, row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "name": row["name"], "mime": row["mime"], "size": row["size"],
+                "url": f"/t/{row['id']}", "download_url": f"/t/{row['id']}?dl=1",
+                "viewable": viewable(row["mime"]), "expires": row["created"] + self.settings.tool_ttl_min * 60}
+
     def delete_message(self, row: sqlite3.Row) -> None:
         if row["kind"] != "text" and not row["expired"]:
-            self.file_path(row["device_id"], row["id"]).unlink(missing_ok=True)
+            self.remove_file(row)
             self.run("UPDATE devices SET used_bytes=MAX(used_bytes-?,0) WHERE id=?", row["size"], row["device_id"])
         self.run("DELETE FROM messages WHERE id=?", row["id"])
 
@@ -371,6 +471,7 @@ class Store:
             await self.send_ws(self.phone_sockets.get(dev["account_id"], set()),
                                {"type": "chat_removed", "chat_id": dev["id"], "reason": reason})
         self.delete_device(dev["id"])
+        self.delete_owner_tools(f"dev:{dev['id']}")
         # Файлы стираем в фоне: на большой папке это может занять время.
         await run_in_threadpool(shutil.rmtree, self.files_root / dev["id"], True)
 
@@ -428,7 +529,7 @@ class Store:
         # 4) Файлы старше срока хранения: файл удаляем, сообщение оставляем с пометкой.
         for row in self.q("SELECT * FROM messages WHERE kind!='text' AND expired=0 AND created<?",
                           now - s.file_ttl_days * DAY):
-            self.file_path(row["device_id"], row["id"]).unlink(missing_ok=True)
+            self.remove_file(row)
             self.run("UPDATE messages SET expired=1 WHERE id=?", row["id"])
             self.run("UPDATE devices SET used_bytes=MAX(used_bytes-?,0) WHERE id=?", row["size"], row["device_id"])
         # 5) Аккаунты без компьютеров, которыми давно не пользовались.
@@ -437,6 +538,15 @@ class Store:
             if not self.phone_online(acc["id"]):
                 self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{acc['id']}")
                 self.run("DELETE FROM accounts WHERE id=?", acc["id"])
+        # 6) Результаты инструментов: хранятся недолго, только чтобы успеть скачать или поделиться.
+        for row in self.q("SELECT * FROM tool_results WHERE created<?", now - s.tool_ttl_min * 60):
+            self.tool_path(row["id"]).unlink(missing_ok=True)
+            self.run("DELETE FROM tool_results WHERE id=?", row["id"])
+
+    def delete_owner_tools(self, owner: str) -> None:
+        for row in self.q("SELECT * FROM tool_results WHERE owner=?", owner):
+            self.tool_path(row["id"]).unlink(missing_ok=True)
+        self.run("DELETE FROM tool_results WHERE owner=?", owner)
 
 
 def preview(row: sqlite3.Row) -> str:
@@ -572,7 +682,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         h = response.headers
         host = request.headers.get("host", "")
         csp = CSP + (f" wss://{host} ws://{host}" if HOST_RE.fullmatch(host) else "")
-        h.setdefault("Content-Security-Policy", csp)
+        if not request.url.path.startswith(("/f/", "/t/")):  # для файлов политику ставят сами обработчики
+            h.setdefault("Content-Security-Policy", csp)
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
         h.setdefault("Referrer-Policy", "no-referrer")
@@ -678,10 +789,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             data["pair"] = {"url": url, "qr_svg": make_qr_svg(url), "expires_in": int(expires - time.time())}
         return data
 
-    async def read_form(request: Request):
+    async def read_form(request: Request, limit_mb: int | None = None):
         """Читает форму с файлами, обрывая загрузку сверх лимита."""
-        limit = settings.max_upload_mb * MB
-        too_big = HTTPException(413, f"Слишком большой размер. Лимит {settings.max_upload_mb} МБ за раз")
+        limit_mb = limit_mb or settings.max_upload_mb
+        limit = limit_mb * MB
+        too_big = HTTPException(413, f"Слишком большой размер. Лимит {limit_mb} МБ за раз")
         length = request.headers.get("content-length")
         if length is not None:
             try:
@@ -788,6 +900,99 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.push(f"acc:{dev['account_id']}", {
                 "title": f"💻 {dev['label']}", "body": body, "url": f"/chat?c={dev['id']}", "tag": dev["id"],
             })
+
+    # ---------------------------------------------------------- конвертер
+
+    def uploads_from_paths(items: list[tuple[Path, str, str]]) -> list[UploadFile]:
+        """Готовые файлы с диска → «загрузки», чтобы положить их в чат обычным путём."""
+        return [UploadFile(path.open("rb"), filename=name, headers=Headers({"content-type": mime}))
+                for path, name, mime in items]
+
+    async def run_converter(op: str, inputs: list[tuple[Path, str, str]], options: dict, out_dir: Path) -> list[Path]:
+        """Отправляет файлы конвертеру и раскладывает результаты в out_dir (по порядку)."""
+        handles = [path.open("rb") for path, _, _ in inputs]
+        try:
+            files = [("files", (name, fh, mime)) for fh, (_, name, mime) in zip(handles, inputs)]
+            async with httpx.AsyncClient(base_url=settings.converter_url, transport=store.converter_transport,
+                                         timeout=httpx.Timeout(300, connect=5)) as client:
+                response = await client.post(f"/convert/{op}", data=options, files=files)
+        except httpx.HTTPError:
+            raise HTTPException(503, "Конвертер сейчас недоступен, попробуй через минуту")
+        finally:
+            for fh in handles:
+                fh.close()
+        if response.status_code == 422:
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = None
+            raise HTTPException(422, detail if isinstance(detail, str) else "Не получилось конвертировать файл")
+        if response.status_code != 200:
+            raise HTTPException(502, "Конвертер не справился с этим файлом")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def unpack() -> list[Path]:
+            outs = []
+            with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+                names = sorted(zf.namelist())
+                if len(names) > 200:
+                    raise HTTPException(502, "Слишком много файлов в результате")
+                for i, member in enumerate(names):
+                    dest = out_dir / f"out-{i:03d}"  # своё имя — никаких путей из архива
+                    with zf.open(member) as src, dest.open("wb") as out:
+                        shutil.copyfileobj(src, out)
+                    outs.append(dest)
+            return outs
+
+        try:
+            return await run_in_threadpool(unpack)
+        except zipfile.BadZipFile:
+            raise HTTPException(502, "Конвертер вернул повреждённый ответ")
+
+    def tool_owner(request: Request) -> tuple[str, str, sqlite3.Row]:
+        role = role_of(request)
+        if role == "pc":
+            dev = require_pc(request)
+            return role, f"dev:{dev['id']}", dev
+        acc = require_phone(request)
+        return role, f"acc:{acc['id']}", acc
+
+    def owner_from_cookies(request: Request) -> set[str]:
+        owners = set()
+        if pc := store.device_by_token(request.cookies.get(PC_COOKIE)):
+            owners.add(f"dev:{pc['id']}")
+        if acc := store.account_by_token(request.cookies.get(PHONE_COOKIE)):
+            owners.add(f"acc:{acc['id']}")
+        return owners
+
+    def result_names(op: str, inputs: list[tuple[Path, str, str]], count: int, title: str | None) -> list[tuple[str, str]]:
+        first = stem(inputs[0][1]) if inputs else "file"
+        if op == "office-pdf":
+            return [(f"{first}.pdf", "application/pdf")]
+        if op == "images-pdf":
+            name = safe_filename(title) if title else "Скан"
+            return [(name if name.lower().endswith(".pdf") else f"{name}.pdf", "application/pdf")]
+        if op == "merge-pdf":
+            return [(f"{first} (объединённый).pdf", "application/pdf")]
+        if op == "pdf-images":
+            return [(f"{first} — стр. {i + 1}.jpg", "image/jpeg") for i in range(count)]
+        return [(f"{stem(inputs[i][1]) if i < len(inputs) else first}.jpg", "image/jpeg") for i in range(count)]
+
+    def check_tool_inputs(op: str, inputs: list[tuple[Path, str, str]]) -> None:
+        if not inputs:
+            raise HTTPException(400, "Выбери файлы")
+        if op == "office-pdf":
+            if len(inputs) != 1 or file_ext(inputs[0][1]) not in OFFICE_EXTS:
+                raise HTTPException(400, "Выбери один документ Word, Excel или PowerPoint")
+        elif op in ("images-pdf", "images-jpg"):
+            if not all(is_image(name, mime) for _, name, mime in inputs):
+                raise HTTPException(400, "Здесь можно использовать только фото и картинки")
+        elif op == "merge-pdf":
+            if len(inputs) < 2 or not all(is_pdf(name, mime) for _, name, mime in inputs):
+                raise HTTPException(400, "Выбери хотя бы два PDF")
+        elif op == "pdf-images":
+            if len(inputs) != 1 or not is_pdf(inputs[0][1], inputs[0][2]):
+                raise HTTPException(400, "Выбери один PDF")
 
     # ------------------------------------------------------------ страницы
 
@@ -1018,15 +1223,160 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if row["expired"]:
             raise HTTPException(410, f"Файл удалён: он хранился {settings.file_ttl_days} дней")
         mime = row["mime"] or "application/octet-stream"
-        inline_ok = mime in INLINE_SAFE_TYPES or mime.startswith(INLINE_SAFE_PREFIXES)
+        inline_ok = viewable(mime) and not dl
+        if not viewable(mime):
+            mime = "application/octet-stream"
+        headers = {}
+        if (policy := file_csp(mime)) is not None:
+            headers["Content-Security-Policy"] = policy
         return FileResponse(
             store.file_path(dev["id"], row["id"]),
-            media_type=mime if inline_ok else "application/octet-stream",
+            media_type=mime,
             filename=row["name"],
-            content_disposition_type="inline" if (inline_ok and not dl) else "attachment",
-            # Даже если в файле окажется скрипт, браузер его не выполнит.
-            headers={"Content-Security-Policy": "sandbox"},
+            content_disposition_type="inline" if inline_ok else "attachment",
+            headers=headers,
         )
+
+    @app.get("/f/{mid}/preview")
+    async def preview_file(mid: str, request: Request):
+        """Word/Excel/PowerPoint: показываем как PDF прямо в браузере (без скачивания)."""
+        row = store.one("SELECT * FROM messages WHERE id=? AND kind='file'", mid)
+        dev = store.device(row["device_id"]) if row else None
+        allowed = dev is not None and (f"dev:{dev['id']}" in owner_from_cookies(request) or
+                                       f"acc:{dev['account_id']}" in owner_from_cookies(request))
+        if not allowed or convert_to(row["name"], row["mime"]) != "pdf":
+            return PlainTextResponse("Файл не найден", 404)
+        if row["expired"]:
+            return PlainTextResponse(f"Файл удалён: он хранился {settings.file_ttl_days} дней", 410)
+        cached = store.preview_path(dev["id"], row["id"])
+        async with store.preview_locks[mid]:  # два одновременных открытия — одна конвертация
+            if not cached.exists():
+                limiter.hit(f"tool:{dev['id']}", settings.tools_per_min, 60)
+                work = store.tmp_root / uuid.uuid4().hex
+                try:
+                    (out,) = await run_converter(
+                        "office-pdf", [(store.file_path(dev["id"], row["id"]), row["name"], row["mime"])], {}, work)
+                    out.replace(cached)
+                except HTTPException as exc:
+                    return PlainTextResponse(f"Не получилось показать документ: {exc.detail}", exc.status_code)
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+        store.preview_locks.pop(mid, None)
+        return FileResponse(cached, media_type="application/pdf", filename=f"{stem(row['name'])}.pdf",
+                            content_disposition_type="inline")
+
+    @app.post("/api/messages/{mid}/convert")
+    async def convert_message(mid: str, request: Request):
+        """Кнопка «В PDF» / «В JPG» у файла в чате: результат появляется в чате новым файлом."""
+        role = role_of(request)
+        row = store.one("SELECT * FROM messages WHERE id=? AND kind='file'", mid)
+        dev = store.device(row["device_id"]) if row else None
+        if role == "pc":
+            allowed = dev is not None and dev["id"] == require_pc(request)["id"]
+        else:
+            allowed = dev is not None and dev["account_id"] == require_phone(request)["id"]
+        if not allowed:
+            raise HTTPException(404, "Файл не найден")
+        if row["expired"]:
+            raise HTTPException(410, "Файл уже удалён")
+        target = convert_to(row["name"], row["mime"])
+        if target is None:
+            raise HTTPException(400, "Этот файл нельзя конвертировать")
+        limiter.hit(f"tool:{dev['id']}", settings.tools_per_min, 60)
+        source = [(store.file_path(dev["id"], row["id"]), row["name"], row["mime"])]
+        work = store.tmp_root / uuid.uuid4().hex
+        try:
+            if target == "pdf":
+                (out,) = await run_converter("office-pdf", source, {}, work)
+                result = [(out, f"{stem(row['name'])}.pdf", "application/pdf")]
+            else:
+                (out,) = await run_converter("images-jpg", source, {"preset": "original"}, work)
+                result = [(out, f"{stem(row['name'])}.jpg", "image/jpeg")]
+            uploads = uploads_from_paths(result)
+            try:
+                items = await add_messages(dev, role, [], uploads, None, None)
+            finally:
+                for up in uploads:
+                    up.file.close()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return {"messages": items}
+
+    # ---------------------------------------------------------- инструменты
+
+    @app.post("/api/tools/send")
+    async def send_tool_results(request: Request):
+        """«Отправить на компьютер»: кладём готовые файлы в выбранный чат."""
+        role, owner, who = tool_owner(request)
+        body = await request.json()
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if not isinstance(ids, list) or not ids or len(ids) > 200:
+            raise HTTPException(400, "Нечего отправлять")
+        dev = who if role == "pc" else phone_chat(who, body.get("chat_id"))
+        limiter.hit(f"send:{who['id']}", settings.sends_per_min, 60)
+        rows = []
+        for rid in ids:
+            row = store.one("SELECT * FROM tool_results WHERE id=? AND owner=?", rid, owner) if isinstance(rid, str) else None
+            if not row or not store.tool_path(rid).exists():
+                raise HTTPException(404, f"Файл не найден — результаты хранятся {settings.tool_ttl_min} минут")
+            rows.append(row)
+        uploads = uploads_from_paths([(store.tool_path(r["id"]), r["name"], r["mime"]) for r in rows])
+        try:
+            items = await add_messages(dev, role, [], uploads, None, None)
+        finally:
+            for up in uploads:
+                up.file.close()
+        return {"messages": items, "chat_id": dev["id"]}
+
+    @app.post("/api/tools/{op}")
+    async def run_tool(op: str, request: Request):
+        if op not in TOOL_OPS:
+            raise HTTPException(404, "Неизвестный инструмент")
+        role, owner, _ = tool_owner(request)
+        limiter.hit(f"tool:{owner}", settings.tools_per_min, 60)
+        ensure_disk_space()
+        work = store.tmp_root / uuid.uuid4().hex
+        (work / "in").mkdir(parents=True)
+        try:
+            form = await read_form(request, settings.tool_max_mb)
+            try:
+                inputs = []
+                for i, up in enumerate(v for v in form.getlist("files") if isinstance(v, UploadFile)):
+                    dest = work / "in" / f"{i:03d}"
+                    if await run_in_threadpool(copy_limited, up.file, dest, settings.tool_max_mb * MB) is None:
+                        raise HTTPException(413, f"Слишком большой размер. Лимит {settings.tool_max_mb} МБ за раз")
+                    mime = normalize_mime(up.content_type) or mimetypes.guess_type(up.filename or "")[0] or ""
+                    inputs.append((dest, safe_filename(up.filename), mime))
+                options = {k: form.get(k) for k in ("mode", "rotations", "preset") if isinstance(form.get(k), str)}
+                title = form.get("name") if isinstance(form.get("name"), str) else None
+            finally:
+                await form.close()
+            check_tool_inputs(op, inputs)
+            outs = await run_converter(op, inputs, options, work / "out")
+            names = result_names(op, inputs, len(outs), title)
+            results = []
+            now = time.time()
+            for i, (path, (name, mime)) in enumerate(zip(outs, names)):
+                rid = uuid.uuid4().hex
+                size = path.stat().st_size
+                path.replace(store.tool_path(rid))
+                store.run("INSERT INTO tool_results (id, owner, name, mime, size, created) VALUES (?,?,?,?,?,?)",
+                          rid, owner, name, mime, size, now + i / 1000)
+                results.append(store.tool_public(store.one("SELECT * FROM tool_results WHERE id=?", rid)))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return {"results": results, "ttl_min": settings.tool_ttl_min}
+
+    @app.get("/t/{rid}")
+    async def get_tool_result(rid: str, request: Request, dl: int = 0):
+        row = store.one("SELECT * FROM tool_results WHERE id=?", rid)
+        if not row or row["owner"] not in owner_from_cookies(request) or not store.tool_path(rid).exists():
+            raise HTTPException(404, f"Файл не найден — результаты хранятся {settings.tool_ttl_min} минут")
+        headers = {}
+        if (policy := file_csp(row["mime"])) is not None:
+            headers["Content-Security-Policy"] = policy
+        return FileResponse(store.tool_path(rid), media_type=row["mime"], filename=row["name"],
+                            content_disposition_type="attachment" if dl else "inline", headers=headers)
 
     # ------------------------------------------------------- уведомления
 

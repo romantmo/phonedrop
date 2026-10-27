@@ -1,10 +1,12 @@
 # compose.yaml — инструкция для сервера: какие «коробки» запускать и как их соединить.
 # Запуск: docker compose up -d   (в папке /opt/phonedrop на сервере)
 #
-# Две коробки:
-#   app   — наше приложение PhoneDrop (берётся из хранилища GitHub);
-#   caddy — «привратник»: принимает посетителей из интернета, сам получает
-#           HTTPS-сертификат (замочек) и передаёт запросы приложению.
+# Три коробки:
+#   app       — наше приложение PhoneDrop (берётся из хранилища GitHub);
+#   converter — конвертер файлов (тот же образ, другая команда). Сидит во внутренней
+#               сети без интернета, не видит базу и переписки, ограничен по памяти;
+#   caddy     — «привратник»: принимает посетителей из интернета, сам получает
+#               HTTPS-сертификат (замочек) и передаёт запросы приложению.
 
 services:
   app:
@@ -20,7 +22,36 @@ services:
       - no-new-privileges:true           # приложению нельзя повышать себе права
     cap_drop:
       - ALL                              # и не нужны никакие особые права Linux
+    networks:
+      - default                          # сеть с Caddy и интернетом (нужен для push-уведомлений)
+      - convert                          # внутренняя сеть до конвертера
+    depends_on:
+      - converter
     # Порт наружу НЕ открываем: снаружи приложение доступно только через Caddy.
+
+  converter:
+    image: ghcr.io/romantmo/phonedrop:${APP_TAG:-latest}
+    command: ["uvicorn", "converter.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    restart: unless-stopped
+    networks:
+      - convert                          # ТОЛЬКО внутренняя сеть: ни интернета, ни Caddy
+    environment:
+      HOME: /tmp
+    read_only: true                      # менять файлы внутри коробки нельзя...
+    tmpfs:
+      - /tmp:size=1536m                  # ...кроме временной папки в памяти (очищается при перезапуске)
+    mem_limit: 1536m                     # даже «тяжёлый» документ не съест всю память сервера
+    cpus: 1.5
+    pids_limit: 200
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   caddy:
     image: caddy:2
@@ -34,6 +65,10 @@ services:
       - caddy-config:/config
     depends_on:
       - app
+
+networks:
+  convert:
+    internal: true                       # из этой сети нет выхода в интернет
 
 volumes:
   phonedrop-data:

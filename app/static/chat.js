@@ -119,6 +119,59 @@ window.PD = (() => {
 
   const IMG_RE = /^image\/(png|jpeg|gif|webp|avif)$/;
 
+  // ---------- «Поделиться» (WhatsApp, Telegram, почта…) через системное меню телефона.
+  // Браузер разрешает открыть это меню только сразу после нажатия, поэтому файл
+  // лучше скачать заранее (prefetchShare), а при нажатии — сразу показать меню.
+  const shareCache = new Map();
+  const canShareFiles = (() => {
+    try {
+      return !!(navigator.share && navigator.canShare &&
+        navigator.canShare({ files: [new File(["x"], "x.pdf", { type: "application/pdf" })] }));
+    } catch { return false; }
+  })();
+
+  async function fetchFile(item) {
+    if (shareCache.has(item.url)) return shareCache.get(item.url);
+    const response = await fetch(item.url, { credentials: "same-origin" });
+    if (!response.ok) throw new Error("Файл больше недоступен");
+    const blob = await response.blob();
+    const file = new File([blob], item.name, { type: item.mime || blob.type });
+    shareCache.set(item.url, file);
+    return file;
+  }
+
+  function prefetchShare(items) {
+    if (canShareFiles) items.forEach((i) => fetchFile(i).catch(() => {}));
+  }
+
+  async function share(files) {
+    if (!navigator.canShare({ files })) {
+      toast("Этот тип файла нельзя отправить через «Поделиться» — скачай его", true);
+      return;
+    }
+    try {
+      await navigator.share({ files });
+    } catch (e) {
+      if (e.name !== "AbortError") toast("Нажми «Поделиться» ещё раз", true);
+    }
+  }
+
+  async function shareFiles(items) {
+    const ready = items.map((i) => shareCache.get(i.url));
+    if (ready.every(Boolean)) return share(ready);
+    const started = Date.now();
+    toast("Готовлю файл…");
+    let files;
+    try {
+      files = await Promise.all(items.map(fetchFile));
+    } catch (e) {
+      return toast(e.message, true);
+    }
+    // Если скачивание заняло долго, браузер уже «забыл» нажатие — просим нажать ещё раз.
+    if (Date.now() - started < 3000) return share(files);
+    toast("Файл готов — нажми «Поделиться» ещё раз");
+  }
+
   class Chat {
     constructor(opts) {
       this.opts = opts;
@@ -182,7 +235,7 @@ window.PD = (() => {
       const actions = el("div", { class: "actions" });
 
       if (m.kind === "text") {
-        bubble.append(el("div", { class: "text" }, linkify(m.text)));
+        bubble.append(el("div", { class: "text", dir: "auto" }, linkify(m.text)));
         actions.append(el("button", { type: "button", onclick: () => copyText(m.text) }, "Копировать"));
       } else if (m.expired) {
         bubble.append(el("div", { class: "expired-file" },
@@ -207,12 +260,34 @@ window.PD = (() => {
         if (IMG_RE.test(mime) || mime.startsWith("video/")) {
           bubble.append(el("div", { class: "caption" }, `${m.name} · ${fmtSize(m.size)}`));
         } else {
+          // Нажатие на файл: PDF, текст и т.п. открываются в новой вкладке,
+          // остальное (docx, zip, exe...) — скачивается, а телефон предложит, чем открыть.
           const ext = (m.name.includes(".") ? m.name.split(".").pop() : "file").slice(0, 4);
-          bubble.append(el("div", { class: "file-row" },
+          const openUrl = m.viewable ? m.url : m.preview_url;  // Word/Excel/PowerPoint — просмотр как PDF
+          const open = openUrl
+            ? { href: openUrl, target: "_blank", rel: "noopener", title: "Открыть" }
+            : { href: m.download_url, download: m.name, title: "Скачать" };
+          bubble.append(el("a", { class: "file-row", ...open },
             el("div", { class: "ext" }, ext),
-            el("div", {}, el("div", { class: "fname" }, m.name), el("div", { class: "fsize" }, fmtSize(m.size)))));
+            el("div", { class: "finfo" },
+              el("div", { class: "fname" }, m.name),
+              el("div", { class: "fsize" }, fmtSize(m.size) + (openUrl ? " · нажми, чтобы открыть" : "")))));
+        }
+        if (m.viewable && !mime.startsWith("video/") && !mime.startsWith("audio/")) {
+          actions.append(el("a", { href: m.url, target: "_blank", rel: "noopener" }, "Открыть"));
+        } else if (m.preview_url) {
+          actions.append(el("a", { href: m.preview_url, target: "_blank", rel: "noopener" }, "Открыть"));
         }
         actions.append(el("a", { href: m.download_url, download: m.name }, "Скачать"));
+        if (m.convert_to) {
+          const btn = el("button", { type: "button", onclick: () => this.convertMessage(m.id, btn) },
+            m.convert_to === "pdf" ? "В PDF" : "В JPG");
+          actions.append(btn);
+        }
+        if (this.role === "phone" && canShareFiles) {
+          actions.append(el("button", { type: "button",
+            onclick: () => shareFiles([{ url: m.url, name: m.name, mime: m.mime }]) }, "Поделиться"));
+        }
         if (IMG_RE.test(mime) && window.ClipboardItem && this.role === "pc") {
           actions.append(el("button", { type: "button", onclick: () => copyImage(m.url) }, "Копировать картинку"));
         }
@@ -222,6 +297,21 @@ window.PD = (() => {
       bubble.append(actions);
       bubble.append(el("div", { class: "meta" }, fmtTime(m.created), mine ? el("span", { class: "tick" }, "✓✓") : null));
       return el("div", { class: "msg " + (mine ? "out" : "in"), id: "m-" + m.id }, bubble);
+    }
+
+    async convertMessage(id, btn) {
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Конвертирую…";
+      try {
+        await api(this.role, `/api/messages/${id}/convert`, { method: "POST" });
+        toast("Готово — новый файл в чате");
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
     }
 
     async deleteMessage(id) {
@@ -515,5 +605,5 @@ window.PD = (() => {
     },
   };
 
-  return { $, el, toast, api, fmtSize, fmtTime, Chat, push };
+  return { $, el, toast, api, fmtSize, fmtTime, Chat, push, canShareFiles, shareFiles, prefetchShare };
 })();

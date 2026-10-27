@@ -10,6 +10,7 @@
   let openId = null;
   let installEvent = null;
   let reloadTimer = null;
+  let tab = "chats"; // вкладка на главном экране: «Компьютеры» или «Инструменты»
 
   const chat = new Chat({
     role: ROLE,
@@ -24,9 +25,10 @@
   function showGate(title, text) {
     chat.stop();
     openId = chat.chatId = null;
-    $("chatView").hidden = true;
+    $("chatView").hidden = $("toolView").hidden = true;
     $("listView").hidden = false;
     $("chatList").hidden = $("fabScan").hidden = $("pushBanner").hidden = true;
+    $("tabs").hidden = $("toolsHome").hidden = true;
     $("gate").hidden = false;
     $("gateTitle").textContent = title || "Подключи компьютер";
     $("gateText").textContent = text || "Открой PhoneDrop на компьютере и отсканируй QR-код.";
@@ -48,11 +50,28 @@
     return c.mode === "remember" ? "🏠 мой компьютер" : "🏢 чужой — удалится после закрытия";
   }
 
+  function setTab(name) {
+    tab = name;
+    for (const [id, value] of [["tabChats", "chats"], ["tabTools", "tools"]]) {
+      $(id).classList.toggle("on", tab === value);
+      $(id).setAttribute("aria-selected", String(tab === value));
+    }
+    renderList();
+  }
+  $("tabChats").addEventListener("click", () => setTab("chats"));
+  $("tabTools").addEventListener("click", () => setTab("tools"));
+
   function renderList() {
     $("gate").hidden = true;
-    $("chatList").hidden = false;
-    $("fabScan").hidden = false;
-    $("pushBanner").hidden = !(chats.length && push.status() === "default");
+    $("tabs").hidden = false;
+    const tools = tab === "tools";
+    $("toolsHome").hidden = !tools;
+    $("chatList").hidden = $("fabScan").hidden = tools;
+    $("pushBanner").hidden = tools || !(chats.length && push.status() === "default");
+    if (tools) {
+      PDTools.renderHome($("toolsHome"), (id) => openTool(id));
+      return;
+    }
     const list = $("chatList");
     list.replaceChildren();
     if (!chats.length) {
@@ -89,11 +108,11 @@
   }
 
   function showList(replace = false) {
-    const wasInChat = !$("chatView").hidden;
+    const wasInside = !$("chatView").hidden || !$("toolView").hidden;
     openId = chat.chatId = null;
-    $("chatView").hidden = true;
+    $("chatView").hidden = $("toolView").hidden = true;
     $("listView").hidden = false;
-    if (wasInChat) animateView("listView", "back");
+    if (wasInside) animateView("listView", "back");
     if (replace) history.replaceState(null, "", "/chat");
     loadChats().catch((e) => e.status === 401 && showGate());
   }
@@ -116,12 +135,25 @@
     openId = chat.chatId = id;
     setHeader(data.chat);
     chat.setMessages(data.messages);
-    $("listView").hidden = true;
+    $("listView").hidden = $("toolView").hidden = true;
     $("chatView").hidden = false;
     animateView("chatView", "forward");
     if (pushHistory) history.pushState({ c: id }, "", `/chat?c=${id}`);
     markRead();
   }
+
+  function openTool(id, pushHistory = true) {
+    if (!PDTools.open(id)) return showList(true);
+    openId = chat.chatId = null;
+    $("listView").hidden = $("chatView").hidden = true;
+    $("toolView").hidden = false;
+    animateView("toolView", "forward");
+    if (pushHistory) history.pushState({ t: id }, "", `/chat?t=${id}`);
+  }
+  $("toolBack").addEventListener("click", () => {
+    if (history.state && history.state.t) history.back();
+    else showList(true);
+  });
 
   function markRead() {
     if (openId && !document.hidden) api(ROLE, `/api/chats/${openId}/read`, { method: "POST" }).catch(() => {});
@@ -159,8 +191,9 @@
 
   document.addEventListener("visibilitychange", markRead);
   window.addEventListener("popstate", () => {
-    const c = new URLSearchParams(location.search).get("c");
-    if (c) openChat(c, false);
+    const q = new URLSearchParams(location.search);
+    if (q.get("c")) openChat(q.get("c"), false);
+    else if (q.get("t")) openTool(q.get("t"), false);
     else showList();
   });
 
@@ -194,7 +227,14 @@
     chat.connect();
     push.sync(ROLE, info.vapid_key);
     const shared = params.get("shared");
-    if (target && chats.some((c) => c.id === target)) {
+    const toolId = params.get("t");
+    if (toolId && PDTools.has(toolId)) {
+      tab = "tools";
+      setTab("tools");
+      history.replaceState(null, "", "/chat");
+      history.pushState({ t: toolId }, "", `/chat?t=${toolId}`);
+      openTool(toolId, false);
+    } else if (target && chats.some((c) => c.id === target)) {
       history.replaceState(null, "", "/chat");
       await openChat(target);
     }
