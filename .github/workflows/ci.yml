@@ -1,10 +1,13 @@
-# CI — «непрерывная проверка и сборка».
-# Каждый раз, когда код попадает на GitHub, робот GitHub:
-#   1) запускает автотесты;
-#   2) если тесты прошли — собирает Docker-образ («коробку» с приложением),
-#      проверяет, что он запускается, и кладёт его в хранилище GitHub (ghcr.io).
+# CI/CD — «непрерывная проверка, сборка и выкладка».
+# Каждый раз, когда код попадает в ветку main, робот GitHub:
+#   1) запускает автотесты;                                        (CI)
+#   2) если тесты прошли — собирает Docker-образ («коробку»),
+#      проверяет, что он запускается, и кладёт его в хранилище GitHub;   (CI)
+#   3) заходит на сервер своим ограниченным ключом и запускает deploy.sh,
+#      а потом проверяет снаружи, что сайт отвечает новой версией.        (CD)
+# Если любой шаг упал — следующие не запускаются, и сайт остаётся на старой рабочей версии.
 
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -92,3 +95,50 @@ jobs:
           docker push "$IMAGE:latest"
           docker push "$IMAGE:${{ github.sha }}"
           echo "Готово: $IMAGE:${{ github.sha }}"
+
+  deploy:
+    name: Выкладка на сервер
+    needs: docker      # только после успешной сборки образа
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production                 # на GitHub появится раздел «Deployments»
+      url: https://drop.rbgen.com
+    concurrency:
+      group: production                # две выкладки одновременно не запускаются
+      cancel-in-progress: false
+    steps:
+      - name: Подготовить ключ робота
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # tr -d '\r' убирает «виндовые» переносы строк, если ключ вставляли из Windows
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts   # «отпечаток» нашего сервера
+
+      - name: Обновить сайт на сервере (deploy.sh)
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          # Ключ робота умеет только запускать deploy.sh. Передаём ему номер версии.
+          ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              "root@$HOST" "${{ github.sha }}"
+
+      - name: Проверить сайт снаружи
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS https://drop.rbgen.com/healthz | grep -q "${{ github.sha }}"; then
+              echo "Сайт работает на новой версии ${{ github.sha }} ✅"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Сайт не ответил новой версией" >&2
+          exit 1
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy
