@@ -31,6 +31,11 @@ chmod +x deploy.sh.new && mv deploy.sh.new deploy.sh   # скрипт обнов
 echo "==> 2/5 Скачиваю новую версию приложения"
 export APP_TAG="$VERSION"
 docker compose pull --quiet
+# Помечаем выложенную версию как «latest» и на самом сервере. Тогда ручной
+# «docker compose up -d» (без APP_TAG) запустит ЭТУ версию, а не старый образ.
+if [[ "$VERSION" != "latest" ]]; then
+  docker tag "ghcr.io/$REPO:$VERSION" "ghcr.io/$REPO:latest"
+fi
 
 echo "==> 3/5 Перезапускаю приложение (база и файлы остаются в томе)"
 docker compose up -d --remove-orphans
