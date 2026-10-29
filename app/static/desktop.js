@@ -2,6 +2,7 @@
 "use strict";
 
 (() => {
+  let peopleChecked = false;
   const { $, api, toast, Chat, push } = PD;
   const ROLE = "pc";
   let state = null;
@@ -27,6 +28,7 @@
     $("logoutBtn").hidden = !linked;
     $("relinkBtn").hidden = !(linked && remember);
     $("tabs").hidden = !linked;  // инструменты — только для подключённого к телефону компьютера
+    if (linked && !peopleChecked) { peopleChecked = true; PDPeople.refresh(); }  // точка на «Люди»
     if (!linked) showSection("chat");
     if (document.activeElement !== $("deviceName")) {
       $("deviceName").value = state.device.label;
@@ -126,6 +128,8 @@
       PDTransfers.refresh();
     } else if (msg.type === "shares_changed") {
       PDShares.refresh();
+    } else if (msg.type === "rooms_changed") {
+      PDPeople.refreshSoon();
     } else if (msg.type === "relinked") {
       closeRelink();
       toast("Телефон переподключён — все чаты на нём");
@@ -215,8 +219,10 @@
     $("dropZone").hidden = name !== "chat";
     $("toolsMain").hidden = name !== "tools";
     $("transfersMain").hidden = name !== "transfers";
+    $("peopleMain").hidden = name !== "people";
+    if (name === "people") PDPeople.mount($("peopleHome"));
     if (name === "transfers") { $("trDot").hidden = true; PDTransfers.refresh(); }
-    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"], ["tabTransfers", "transfers"]]) {
+    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"], ["tabPeople", "people"], ["tabTransfers", "transfers"]]) {
       $(id).classList.toggle("on", section === value);
       $(id).setAttribute("aria-selected", String(section === value));
     }
@@ -240,6 +246,8 @@
   $("tabChat").addEventListener("click", () => showSection("chat"));
   $("tabTools").addEventListener("click", () => showSection("tools"));
   $("tabTransfers").addEventListener("click", () => showSection("transfers"));
+  $("tabPeople").addEventListener("click", () => showSection("people"));
+  PDPeople.onUnread((n) => { $("peDot").hidden = !n; });
   function transferMode(share) {
     $("trModeMine").classList.toggle("on", !share);
     $("trModeShare").classList.toggle("on", share);

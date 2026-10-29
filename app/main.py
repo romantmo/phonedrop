@@ -50,7 +50,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 PC_COOKIE = "pd_pc"
 PHONE_COOKIE = "pd_phone"
 ROLE_HEADER = "x-pd-role"
-ROLES = ("pc", "phone")
+ROOM_COOKIE = "pd_rg"  # собеседник в «чате с человеком» (без регистрации)
+ROLES = ("pc", "phone", "room")
 MODES = ("temp", "remember")
 MB = 1024 * 1024
 DAY = 86400
@@ -58,6 +59,9 @@ MAX_TEXT_CHARS = 20_000
 MAX_DEVICES = 10
 MAX_VOICE_SEC = 600
 PHONE_COOKIE_DAYS = 365
+ROOM_INVITE_HOURS = 24   # одноразовый код приглашения в чат действует сутки
+MAX_ROOMS = 50
+MAX_VOICE_MB = 50
 
 # Что можно показывать прямо в браузере. Всё остальное (html, svg, exe...) — только скачивание.
 INLINE_SAFE_PREFIXES = ("video/", "audio/")
@@ -236,6 +240,40 @@ CREATE TABLE IF NOT EXISTS share_sessions (
     share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
     expires  REAL NOT NULL
 );
+-- Чаты с людьми: владелец (аккаунт) + один собеседник без регистрации.
+CREATE TABLE IF NOT EXISTS rooms (
+    id             TEXT PRIMARY KEY,
+    account_id     TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    title          TEXT NOT NULL,
+    owner_name     TEXT NOT NULL,
+    guest_hash     TEXT,
+    invite_code    TEXT UNIQUE,
+    invite_token   TEXT UNIQUE,
+    invite_expires REAL NOT NULL DEFAULT 0,
+    created        REAL NOT NULL,
+    last_activity  REAL NOT NULL,
+    joined         REAL,
+    owner_read_at  REAL NOT NULL DEFAULT 0,
+    guest_read_at  REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS rooms_by_account ON rooms(account_id);
+CREATE INDEX IF NOT EXISTS rooms_by_guest ON rooms(guest_hash);
+CREATE TABLE IF NOT EXISTS room_messages (
+    id       TEXT PRIMARY KEY,
+    room_id  TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    sender   TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    created  REAL NOT NULL,
+    text     TEXT,
+    name     TEXT,
+    size     INTEGER NOT NULL DEFAULT 0,
+    mime     TEXT,
+    duration REAL,
+    received INTEGER NOT NULL DEFAULT 0,
+    done     REAL,
+    expired  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS room_messages_by_room ON room_messages(room_id, created);
 CREATE TABLE IF NOT EXISTS scan_pages (
     id      TEXT PRIMARY KEY,
     owner   TEXT NOT NULL,
@@ -285,6 +323,8 @@ class Settings:
     transfer_quota_mb: int = field(default_factory=lambda: _env_int("TRANSFER_QUOTA_MB", 20480))
     transfer_ttl_hours: int = field(default_factory=lambda: _env_int("TRANSFER_TTL_HOURS", 24))
     transfer_chunk_mb: int = field(default_factory=lambda: _env_int("TRANSFER_CHUNK_MB", 8))
+    # Чаты с людьми: файлы живут TRANSFER_TTL_HOURS, чат без активности закрывается через ROOM_IDLE_DAYS.
+    room_idle_days: int = field(default_factory=lambda: _env_int("ROOM_IDLE_DAYS", 30))
     # Вход через Google. Ключи лежат только на сервере (файл .env), не в GitHub.
     google_client_id: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_ID", ""))
     google_client_secret: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_SECRET", ""))
@@ -324,6 +364,7 @@ class Store:
         self.db: sqlite3.Connection | None = None
         self.pc_sockets: dict[str, set[WebSocket]] = defaultdict(set)  # компьютер -> соединения
         self.phone_sockets: dict[str, set[WebSocket]] = defaultdict(set)  # аккаунт -> соединения
+        self.room_sockets: dict[str, dict[WebSocket, str]] = defaultdict(dict)  # чат с человеком -> {соединение: "owner"|"guest"}
         self.vapid = None
         self.vapid_public = ""
         self.push_sender = self._send_webpush
@@ -507,7 +548,7 @@ class Store:
             if total > MAX_DEVICES:
                 raise HTTPException(409, f"Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные")
             old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
-            for table in ("devices", "transfers", "shares"):
+            for table in ("devices", "transfers", "shares", "rooms"):
                 self.run(f"UPDATE {table} SET account_id=? WHERE account_id=?", current["id"], target["id"])
             self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{target['id']}")
             self.delete_owner_tools(f"acc:{target['id']}")
@@ -533,6 +574,7 @@ class Store:
             self.run("UPDATE devices SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE transfers SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE shares SET account_id=? WHERE account_id=?", target["id"], current["id"])
+            self.run("UPDATE rooms SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE push_subs SET owner=? WHERE owner=?", f"acc:{target['id']}", f"acc:{current['id']}")
             self.delete_owner_tools(f"acc:{current['id']}")
             self.run("DELETE FROM accounts WHERE id=?", current["id"])
@@ -646,13 +688,96 @@ class Store:
         a = self.one("SELECT COALESCE(SUM(size), 0) AS n FROM transfers WHERE account_id=?", account_id)["n"]
         b = self.one("SELECT COALESCE(SUM(f.size), 0) AS n FROM share_files f JOIN shares s ON s.id=f.share_id "
                      "WHERE s.account_id=?", account_id)["n"]
-        return a + b
+        c = self.one("SELECT COALESCE(SUM(m.size), 0) AS n FROM room_messages m JOIN rooms r ON r.id=m.room_id "
+                     "WHERE r.account_id=? AND m.kind!='text' AND m.expired=0", account_id)["n"]
+        return a + b + c
 
     def reserved_bytes(self) -> int:
         """Сколько ещё должно «доехать» во все незаконченные загрузки — это место уже занято."""
         a = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM transfers WHERE done IS NULL")["n"]
         b = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM share_files WHERE done IS NULL")["n"]
-        return a + b
+        c = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM room_messages WHERE done IS NULL")["n"]
+        return a + b + c
+
+    # ---------- чаты с людьми
+    def room_path(self, mid: str) -> Path:
+        return self.transfers_root / f"r-{mid}"
+
+    def room_preview_path(self, mid: str) -> Path:
+        return self.transfers_root / f"r-{mid}.preview.pdf"
+
+    def remove_room_file(self, mid: str) -> None:
+        self.room_path(mid).unlink(missing_ok=True)
+        self.room_preview_path(mid).unlink(missing_ok=True)
+        self.transfer_locks.pop(mid, None)
+
+    def delete_room_message(self, row: sqlite3.Row) -> None:
+        if row["kind"] != "text":
+            self.remove_room_file(row["id"])
+        self.run("DELETE FROM room_messages WHERE id=?", row["id"])
+
+    def delete_room(self, rid: str) -> None:
+        for row in self.q("SELECT id FROM room_messages WHERE room_id=? AND kind!='text'", rid):
+            self.remove_room_file(row["id"])
+        self.run("DELETE FROM rooms WHERE id=?", rid)  # сообщения удалятся каскадом
+
+    def room_message_public(self, row: sqlite3.Row) -> dict:
+        data = {"id": row["id"], "chat_id": row["room_id"], "sender": row["sender"],
+                "kind": row["kind"], "created": row["created"]}
+        if row["kind"] == "text":
+            data["text"] = row["text"]
+            return data
+        data.update(name=row["name"], size=row["size"], mime=row["mime"])
+        if row["duration"] is not None:
+            data["duration"] = row["duration"]
+        if row["expired"]:
+            data["expired"] = True
+        else:
+            data.update(url=f"/r/{row['id']}", download_url=f"/r/{row['id']}?dl=1", viewable=viewable(row["mime"]),
+                        expires=(row["done"] or row["created"]) + self.settings.transfer_ttl_hours * 3600)
+            if convert_to(row["name"], row["mime"]) == "pdf":
+                data["preview_url"] = f"/r/{row['id']}/preview"
+        return data
+
+    def room_online(self, rid: str, side: str) -> bool:
+        return side in self.room_sockets.get(rid, {}).values()
+
+    async def to_room(self, rid: str, message: dict, side: str | None = None) -> None:
+        pool = self.room_sockets.get(rid, {})
+        for ws, who in list(pool.items()):
+            if side and who != side:
+                continue
+            try:
+                await ws.send_json(message)
+            except Exception:
+                pool.pop(ws, None)
+
+    async def kick_room(self, rid: str, side: str | None, reason: str) -> None:
+        """Закрывает соединения чата (все или только одной стороны) с причиной."""
+        pool = self.room_sockets.get(rid, {})
+        for ws, who in list(pool.items()):
+            if side and who != side:
+                continue
+            pool.pop(ws, None)
+            try:
+                await ws.send_json({"type": "closed", "reason": reason})
+                await ws.close(code=4000)
+            except Exception:
+                pass
+
+    async def to_account(self, account_id: str, message: dict) -> None:
+        """Событие для всех устройств владельца: телефон и его компьютеры (обновить список чатов)."""
+        await self.send_ws(self.phone_sockets.get(account_id, set()), message)
+        for d in self.q("SELECT id FROM devices WHERE account_id=?", account_id):
+            await self.send_ws(self.pc_sockets.get(d["id"], set()), message)
+
+    async def close_room(self, rid: str, reason: str) -> None:
+        room = self.one("SELECT * FROM rooms WHERE id=?", rid)
+        await self.kick_room(rid, None, reason)
+        self.room_sockets.pop(rid, None)
+        self.delete_room(rid)
+        if room:
+            await self.to_account(room["account_id"], {"type": "rooms_changed"})
 
     def scan_path(self, pid: str, kind: str) -> Path:
         # kind: "orig" — фото как есть, "work" — уменьшенная копия для быстрых превью
@@ -790,7 +915,8 @@ class Store:
             self.run("UPDATE devices SET used_bytes=MAX(used_bytes-?,0) WHERE id=?", row["size"], row["device_id"])
         # 5) Аккаунты без компьютеров, которыми давно не пользовались.
         for acc in self.q("SELECT * FROM accounts WHERE last_active<? AND NOT EXISTS "
-                          "(SELECT 1 FROM devices WHERE account_id=accounts.id)", now - s.file_ttl_days * DAY):
+                          "(SELECT 1 FROM devices WHERE account_id=accounts.id) AND NOT EXISTS "
+                          "(SELECT 1 FROM rooms WHERE account_id=accounts.id)", now - s.file_ttl_days * DAY):
             if not self.phone_online(acc["id"]):
                 self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{acc['id']}")
                 self.run("DELETE FROM accounts WHERE id=?", acc["id"])
@@ -806,6 +932,16 @@ class Store:
             self.delete_share(row["id"])
         self.run("DELETE FROM share_sessions WHERE expires<?", now)
         self.run("DELETE FROM share_access WHERE expires<?", now)
+        # 8) Чаты с людьми: файлы живут сутки (недокачанные — тоже), текст остаётся.
+        #    Чат, в котором 30 дней ничего не происходило, закрывается сам.
+        ttl = now - s.transfer_ttl_hours * 3600
+        for row in self.q("SELECT id FROM room_messages WHERE kind!='text' AND expired=0 AND done IS NOT NULL AND done<?", ttl):
+            self.remove_room_file(row["id"])
+            self.run("UPDATE room_messages SET expired=1 WHERE id=?", row["id"])
+        for row in self.q("SELECT * FROM room_messages WHERE done IS NULL AND created<?", ttl):
+            self.delete_room_message(row)
+        for room in self.q("SELECT id FROM rooms WHERE last_activity<?", now - s.room_idle_days * DAY):
+            await self.close_room(room["id"], "idle")
         # 7) Страницы сканера, с которыми давно ничего не делали.
         for row in self.q("SELECT id FROM scan_pages WHERE created<?", now - s.tool_ttl_min * 60):
             self.remove_scan_page(row["id"])
@@ -954,7 +1090,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = request.url.path
         is_guest_file = path.startswith("/g/") and path.count("/") >= 3  # /g/<ключ>/<файл>
         owner_file = path.startswith("/api/shares/") and path.endswith("/download")
-        if not path.startswith(("/f/", "/t/", "/s/", "/x/")) and not is_guest_file and not owner_file:  # для файлов политику ставят сами обработчики
+        if not path.startswith(("/f/", "/t/", "/s/", "/x/", "/r/")) and not is_guest_file and not owner_file:  # для файлов политику ставят сами обработчики
             h.setdefault("Content-Security-Policy", csp)
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
@@ -1287,6 +1423,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------ страницы
 
+    def guest_only(request: Request) -> bool:
+        """Собеседник из «чата с человеком»: своего аккаунта нет, но есть чаты, в которые он вошёл по коду."""
+        c = request.cookies
+        if store.account_by_token(c.get(PHONE_COOKIE)) or store.device_by_token(c.get(PC_COOKIE)):
+            return False
+        key = c.get(ROOM_COOKIE)
+        return bool(key and store.one("SELECT 1 FROM rooms WHERE guest_hash=?", token_hash(key)))
+
     def is_phone(user_agent: str) -> bool:
         ua = user_agent or ""
         return ("Android" in ua and "Mobile" in ua) or "iPhone" in ua
@@ -1295,12 +1439,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def desktop_page(request: Request, desktop: int = 0):
         # С телефона главная страница сразу ведёт в приложение для телефона.
         # Планшеты (без слова Mobile) остаются «компьютером». ?desktop=1 — открыть страницу компьютера вручную.
+        if not desktop and guest_only(request):
+            return RedirectResponse("/get", status_code=302)
         if not desktop and is_phone(request.headers.get("user-agent", "")):
             return RedirectResponse("/chat", status_code=302)
         return FileResponse(STATIC_DIR / "desktop.html")
 
     @app.get("/chat", include_in_schema=False)
-    async def phone_page():
+    async def phone_page(request: Request):
+        if guest_only(request) and not request.query_params:
+            return RedirectResponse("/get", status_code=302)
         return FileResponse(STATIC_DIR / "phone.html")
 
     @app.get("/pair/{code}", include_in_schema=False)
@@ -1842,7 +1990,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         token = secrets.token_urlsafe(24)
         while True:  # 9 цифр; совпадение с действующим кодом почти невозможно, но проверяем
             code = f"{secrets.randbelow(10**9):09d}"
-            if not store.one("SELECT 1 FROM shares WHERE code_hash=?", store.keyed_hash(code)):
+            h = store.keyed_hash(code)
+            if not store.one("SELECT 1 FROM shares WHERE code_hash=?", h) and \
+                    not store.one("SELECT 1 FROM rooms WHERE invite_code=?", h):
                 return token, code
 
     def share_links(request: Request, token: str, code: str) -> dict:
@@ -1975,6 +2125,441 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store.delete_share_file(fid)
         return {"ok": True}
 
+    # ------------------------------------------------------- чаты с людьми
+    # Владелец (аккаунт) создаёт чат и получает одноразовый код/ссылку на сутки.
+    # Собеседник вводит код — и без регистрации попадает в общий чат: текст, фото, голосовые,
+    # файлы до 10 ГБ в обе стороны. Его браузер получает cookie pd_rg (в базе — только отпечаток).
+    # Текст хранится, пока чат не закроют; файлы — сутки; чат без активности 30 дней закрывается сам.
+
+    def clean_name(value, default: str = "") -> str:
+        text = re.sub(r"[\x00-\x1f\x7f]", "", value if isinstance(value, str) else "").strip()
+        return text[:40] or default
+
+    def room_side(room: sqlite3.Row, cookies) -> str | None:
+        """Кто открыл чат: "owner" (телефон или компьютер владельца), "guest" (собеседник) или никто."""
+        acc = store.account_by_token(cookies.get(PHONE_COOKIE))
+        if acc and acc["id"] == room["account_id"]:
+            return "owner"
+        dev = store.device_by_token(cookies.get(PC_COOKIE))
+        if dev and dev["account_id"] and dev["account_id"] == room["account_id"]:
+            return "owner"
+        key = cookies.get(ROOM_COOKIE)
+        if key and room["guest_hash"] and hmac.compare_digest(token_hash(key), room["guest_hash"]):
+            return "guest"
+        return None
+
+    def room_member(rid: str, request: Request) -> tuple[sqlite3.Row, str]:
+        role_of(request, "room")
+        room = store.one("SELECT * FROM rooms WHERE id=?", rid)
+        side = room_side(room, request.cookies) if room else None
+        if not side:
+            raise HTTPException(404, "Чат не найден — возможно, его закрыли")
+        if side == "owner":
+            store.run("UPDATE accounts SET last_active=? WHERE id=?", time.time(), room["account_id"])
+        return room, side
+
+    def room_owner(rid: str, request: Request) -> sqlite3.Row:
+        room, side = room_member(rid, request)
+        if side != "owner":
+            raise HTTPException(403, "Это может только тот, кто создал чат")
+        return room
+
+    def room_last(rid: str, unread_from: str, read_at: float) -> tuple[dict | None, int]:
+        last = store.one("SELECT * FROM room_messages WHERE room_id=? AND done IS NOT NULL "
+                         "ORDER BY created DESC LIMIT 1", rid)
+        unread = store.one("SELECT COUNT(*) AS n FROM room_messages WHERE room_id=? AND sender=? "
+                           "AND done IS NOT NULL AND created>?", rid, unread_from, read_at)["n"]
+        info = {"sender": last["sender"], "preview": preview(last), "created": last["created"]} if last else None
+        return info, unread
+
+    def room_summary(room: sqlite3.Row) -> dict:
+        """Строка в списке чатов владельца."""
+        last, unread = room_last(room["id"], "guest", room["owner_read_at"])
+        pending = bool(room["invite_code"]) and room["invite_expires"] > time.time()
+        return {"id": room["id"], "title": room["title"], "owner_name": room["owner_name"],
+                "joined": bool(room["guest_hash"]), "online": store.room_online(room["id"], "guest"),
+                "unread": unread, "last": last, "last_activity": room["last_activity"], "created": room["created"],
+                "invite_expires": room["invite_expires"] if pending else None}
+
+    def room_guest_summary(room: sqlite3.Row) -> dict:
+        last, unread = room_last(room["id"], "owner", room["guest_read_at"])
+        return {"id": room["id"], "title": room["owner_name"], "unread": unread, "last": last,
+                "online": store.room_online(room["id"], "owner"), "last_activity": room["last_activity"]}
+
+    def new_invite(rid: str, request: Request) -> dict:
+        _, code = new_share_secrets()  # 9 цифр, не совпадает ни с одной посылкой и приглашением
+        token = secrets.token_urlsafe(24)
+        expires = time.time() + ROOM_INVITE_HOURS * 3600
+        store.run("UPDATE rooms SET invite_code=?, invite_token=?, invite_expires=? WHERE id=?",
+                  store.keyed_hash(code), store.keyed_hash(token), expires, rid)
+        return {"code": f"{code[:3]} {code[3:6]} {code[6:]}", "link": f"{base_url(request)}/j/{token}",
+                "get_url": f"{base_url(request)}/get", "expires": expires}
+
+    async def room_presence(rid: str) -> None:
+        await store.to_room(rid, {"type": "presence", "chat_id": rid,
+                                  "guest_online": store.room_online(rid, "guest"),
+                                  "owner_online": store.room_online(rid, "owner")})
+
+    def push_room_owner(room: sqlite3.Row, payload: dict) -> None:
+        store.push(f"acc:{room['account_id']}", payload)
+        for d in store.q("SELECT id FROM devices WHERE account_id=? AND mode='remember'", room["account_id"]):
+            store.push(f"dev:{d['id']}", payload)
+
+    async def room_posted(room: sqlite3.Row, side: str, row: sqlite3.Row) -> dict:
+        """Новое сообщение: показать обеим сторонам, обновить списки, отправить уведомление."""
+        message = store.room_message_public(row)
+        now = time.time()
+        read_col = "owner_read_at" if side == "owner" else "guest_read_at"
+        store.run(f"UPDATE rooms SET last_activity=?, {read_col}=? WHERE id=?", now, now + 1, room["id"])
+        await store.to_room(room["id"], {"type": "message", "chat_id": room["id"], "message": message})
+        await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        body = preview(row)
+        url, tag = f"/room/{room['id']}", f"room-{room['id']}"
+        if side == "guest":
+            if not store.room_online(room["id"], "owner"):
+                push_room_owner(room, {"title": f"💬 {room['title']}", "body": body, "url": url, "tag": tag})
+        elif room["guest_hash"] and not store.room_online(room["id"], "guest"):
+            store.push(f"guest:{room['guest_hash']}", {"title": f"💬 {room['owner_name']}", "body": body,
+                                                         "url": url, "tag": tag})
+        return message
+
+    async def join_room(room: sqlite3.Row, request: Request) -> JSONResponse:
+        """Собеседник вошёл по коду или ссылке: приглашение сгорает, браузер получает ключ чата."""
+        if room_side(room, request.cookies) == "owner":
+            raise HTTPException(400, "Это приглашение в твой же чат. Отправь код собеседнику — войти должен он")
+        key = request.cookies.get(ROOM_COOKIE) or ""
+        if not re.fullmatch(r"[\w-]{32,64}", key):
+            key = secrets.token_urlsafe(32)
+        h = token_hash(key)
+        old = room["guest_hash"]
+        now = time.time()
+        store.run("UPDATE rooms SET guest_hash=?, invite_code=NULL, invite_token=NULL, invite_expires=0, "
+                  "joined=?, last_activity=? WHERE id=?", h, now, now, room["id"])
+        if old and old != h:  # по новому коду вошёл другой браузер — старый вход больше не работает
+            await store.kick_room(room["id"], "guest", "replaced")
+        await room_presence(room["id"])
+        await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        await store.to_room(room["id"], {"type": "joined", "chat_id": room["id"]}, side="owner")
+        push_room_owner(room, {"title": f"✅ {room['title']} вошёл в чат", "body": "Можно переписываться",
+                               "url": f"/room/{room['id']}", "tag": f"room-{room['id']}"})
+        response = JSONResponse({"room": room["id"]})
+        response.set_cookie(ROOM_COOKIE, key, max_age=PHONE_COOKIE_DAYS * DAY, httponly=True,
+                            samesite="lax", secure=is_https(request), path="/")
+        return response
+
+    @app.get("/room/{rid}", include_in_schema=False)
+    async def room_page(rid: str):
+        return FileResponse(STATIC_DIR / "room.html")
+
+    @app.get("/j/{token}", include_in_schema=False)
+    async def room_invite_page(token: str):
+        # Приглашение здесь НЕ тратится (его тратит кнопка на странице через POST):
+        # превью ссылок в WhatsApp/Telegram не «съедят» одноразовую ссылку.
+        return FileResponse(STATIC_DIR / "room.html")
+
+    @app.get("/api/rooms")
+    async def list_rooms(request: Request):
+        role, _, who = tool_owner(request)
+        rows = store.q("SELECT * FROM rooms WHERE account_id=? ORDER BY last_activity DESC", account_of(role, who))
+        return {"rooms": [room_summary(r) for r in rows], "idle_days": settings.room_idle_days,
+                "file_ttl_hours": settings.transfer_ttl_hours}
+
+    @app.post("/api/rooms")
+    async def create_room(request: Request):
+        role, _, who = tool_owner(request)
+        account_id = account_of(role, who)
+        limiter.hit(f"room-new:{account_id}", 20, 600)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        if store.one("SELECT COUNT(*) AS n FROM rooms WHERE account_id=?", account_id)["n"] >= MAX_ROOMS:
+            raise HTTPException(400, f"Не больше {MAX_ROOMS} чатов. Закрой старые")
+        rid = uuid.uuid4().hex
+        now = time.time()
+        store.run("INSERT INTO rooms (id, account_id, title, owner_name, created, last_activity) VALUES (?,?,?,?,?,?)",
+                  rid, account_id, clean_name(body.get("title"), "Собеседник"),
+                  clean_name(body.get("owner_name"), "PhoneDrop"), now, now)
+        await store.to_account(account_id, {"type": "rooms_changed"})
+        return {"room": room_summary(store.one("SELECT * FROM rooms WHERE id=?", rid))}
+
+    @app.get("/api/rooms/{rid}")
+    async def get_room(rid: str, request: Request):
+        room, side = room_member(rid, request)
+        now = time.time()
+        store.run(f"UPDATE rooms SET {side}_read_at=? WHERE id=?", now, rid)
+        rows = store.q("SELECT * FROM (SELECT * FROM room_messages WHERE room_id=? AND done IS NOT NULL "
+                       "ORDER BY created DESC LIMIT 1000) ORDER BY created", rid)
+        mine = store.q("SELECT * FROM room_messages WHERE room_id=? AND sender=? AND done IS NULL ORDER BY created",
+                       rid, side)
+        owner = side == "owner"
+        return {
+            "room": {"id": rid, "me": side, "title": room["title"] if owner else room["owner_name"],
+                     "owner_name": room["owner_name"], "joined": bool(room["guest_hash"]),
+                     "peer_online": store.room_online(rid, "guest" if owner else "owner"),
+                     "invite_expires": room["invite_expires"] if owner and room["invite_code"]
+                     and room["invite_expires"] > now else None},
+            "messages": [store.room_message_public(r) for r in rows],
+            "uploads": [{"id": r["id"], "name": r["name"], "size": r["size"], "received": r["received"],
+                         "kind": r["kind"]} for r in mine],
+            "chunk_mb": settings.transfer_chunk_mb, "max_mb": settings.transfer_max_mb,
+            "file_ttl_hours": settings.transfer_ttl_hours, "idle_days": settings.room_idle_days,
+            "vapid_key": store.vapid_public,
+        }
+
+    @app.post("/api/rooms/{rid}/read")
+    async def read_room(rid: str, request: Request):
+        room, side = room_member(rid, request)
+        store.run(f"UPDATE rooms SET {side}_read_at=? WHERE id=?", time.time(), rid)
+        if side == "owner":
+            await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        return {"ok": True}
+
+    @app.post("/api/rooms/{rid}/invite")
+    async def room_invite(rid: str, request: Request):
+        """Новый код и ссылка (старые перестают работать). Кто войдёт — тот и станет собеседником."""
+        room = room_owner(rid, request)
+        limiter.hit(f"room-invite:{rid}", 20, 600)
+        invite = new_invite(rid, request)
+        await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        return {**invite, "replaces": bool(room["guest_hash"])}
+
+    @app.post("/api/rooms/{rid}/rename")
+    async def rename_room(rid: str, request: Request):
+        room = room_owner(rid, request)
+        body = await request.json()
+        title = clean_label(body.get("title") if isinstance(body, dict) and isinstance(body.get("title"), str) else "")
+        store.run("UPDATE rooms SET title=? WHERE id=?", title, rid)
+        await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        return {"title": title}
+
+    @app.delete("/api/rooms/{rid}")
+    async def close_room(rid: str, request: Request):
+        room_owner(rid, request)
+        await store.close_room(rid, "room_closed")
+        return {"ok": True}
+
+    @app.post("/api/rooms/{rid}/leave")
+    async def leave_room(rid: str, request: Request):
+        room, side = room_member(rid, request)
+        if side != "guest":
+            raise HTTPException(400, "Создатель чата может его только закрыть")
+        store.run("UPDATE rooms SET guest_hash=NULL WHERE id=?", rid)
+        await store.kick_room(rid, "guest", "left")
+        await room_presence(rid)
+        await store.to_room(rid, {"type": "left", "chat_id": rid}, side="owner")
+        await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        push_room_owner(room, {"title": f"🚪 {room['title']} вышел из чата",
+                               "body": "Чтобы продолжить, отправь ему новый код", "url": f"/room/{rid}",
+                               "tag": f"room-{rid}"})
+        return {"ok": True}
+
+    @app.post("/api/rooms/{rid}/messages")
+    async def room_send_text(rid: str, request: Request):
+        room, side = room_member(rid, request)
+        limiter.hit(f"room-send:{rid}:{side}", settings.sends_per_min, 60)
+        body = await request.json()
+        text = body.get("text") if isinstance(body, dict) and isinstance(body.get("text"), str) else ""
+        text = text.replace("\r\n", "\n").strip()
+        if not text:
+            raise HTTPException(400, "Пустое сообщение")
+        if len(text) > MAX_TEXT_CHARS:
+            raise HTTPException(413, f"Слишком длинный текст (максимум {MAX_TEXT_CHARS} символов)")
+        mid, now = uuid.uuid4().hex, time.time()
+        store.run("INSERT INTO room_messages (id, room_id, sender, kind, created, text, done) VALUES (?,?,?,?,?,?,?)",
+                  mid, rid, side, "text", now, text, now)
+        return {"message": await room_posted(room, side, store.one("SELECT * FROM room_messages WHERE id=?", mid))}
+
+    @app.post("/api/rooms/{rid}/files")
+    async def room_add_file(rid: str, request: Request):
+        """Начать отправку файла (или голосового): дальше он грузится частями, как в «Передачах»."""
+        room, side = room_member(rid, request)
+        limiter.hit(f"room-file:{rid}:{side}", 120, 600)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        size = body.get("size")
+        if not isinstance(size, int) or size <= 0:
+            raise HTTPException(400, "Пустой файл отправлять незачем")
+        kind = "voice" if body.get("kind") == "voice" else "file"
+        name = safe_filename(body.get("name") if isinstance(body.get("name"), str) else "")
+        mime = normalize_mime(body.get("mime") if isinstance(body.get("mime"), str) else "") or \
+            mimetypes.guess_type(name)[0] or "application/octet-stream"
+        duration = None
+        if kind == "voice":
+            if not mime.startswith("audio/"):
+                raise HTTPException(400, "Голосовое сообщение должно быть аудиофайлом")
+            if size > MAX_VOICE_MB * MB:
+                raise HTTPException(413, "Слишком длинное голосовое")
+            try:
+                duration = round(min(max(float(body.get("duration") or 0), 0.0), MAX_VOICE_SEC), 1)
+            except (TypeError, ValueError):
+                duration = 0.0
+            name = f"voice-{time.strftime('%H%M%S')}{mimetypes.guess_extension(mime) or '.webm'}"
+        if store.one("SELECT COUNT(*) AS n FROM room_messages WHERE room_id=? AND sender=? AND done IS NULL",
+                     rid, side)["n"] >= 20:
+            raise HTTPException(429, "Слишком много незаконченных загрузок — дождись их или удали")
+        check_space(room["account_id"], size)
+        mid = uuid.uuid4().hex
+        store.run("INSERT INTO room_messages (id, room_id, sender, kind, created, name, size, mime, duration) "
+                  "VALUES (?,?,?,?,?,?,?,?,?)", mid, rid, side, kind, time.time(), name, size, mime, duration)
+        store.room_path(mid).touch()
+        return {"id": mid, "name": name, "size": size, "received": 0, "kind": kind}
+
+    def my_room_upload(rid: str, mid: str, side: str) -> sqlite3.Row:
+        row = store.one("SELECT * FROM room_messages WHERE id=? AND room_id=? AND sender=? AND kind!='text'",
+                        mid, rid, side)
+        if not row:
+            raise HTTPException(404, "Файл не найден — возможно, прошли сутки и загрузка удалена")
+        return row
+
+    @app.get("/api/rooms/{rid}/files/{mid}")
+    async def room_file_status(rid: str, mid: str, request: Request):
+        _, side = room_member(rid, request)
+        row = my_room_upload(rid, mid, side)
+        data = {"received": row["received"], "done": bool(row["done"])}
+        if row["done"]:
+            data["message"] = store.room_message_public(row)
+        return data
+
+    @app.put("/api/rooms/{rid}/files/{mid}/data")
+    async def room_upload_chunk(rid: str, mid: str, request: Request, offset: int = -1):
+        room, side = room_member(rid, request)
+        async with store.transfer_locks[mid]:
+            row = my_room_upload(rid, mid, side)
+            if row["done"]:
+                return {"received": row["received"], "done": True}
+            if offset != row["received"]:
+                return JSONResponse({"detail": "Не то место в файле", "received": row["received"]}, status_code=409)
+            received = await write_chunk(store.room_path(mid), row["size"], offset, request)
+            done = time.time() if received == row["size"] else None
+            if done:  # файл появляется в чате в момент, когда загрузился целиком
+                store.run("UPDATE room_messages SET received=?, done=?, created=? WHERE id=?", received, done, done, mid)
+            else:
+                store.run("UPDATE room_messages SET received=? WHERE id=?", received, mid)
+        if done:
+            await room_posted(room, side, store.one("SELECT * FROM room_messages WHERE id=?", mid))
+        return {"received": received, "done": bool(done)}
+
+    @app.delete("/api/rooms/{rid}/messages/{mid}")
+    async def room_delete_message(rid: str, mid: str, request: Request):
+        room, side = room_member(rid, request)
+        row = store.one("SELECT * FROM room_messages WHERE id=? AND room_id=?", mid, rid)
+        if not row:
+            raise HTTPException(404, "Сообщение не найдено")
+        if row["sender"] != side:
+            raise HTTPException(403, "Удалять можно только свои сообщения")
+        store.delete_room_message(row)
+        await store.to_room(rid, {"type": "deleted", "chat_id": rid, "id": mid})
+        await store.to_account(room["account_id"], {"type": "rooms_changed"})
+        return {"ok": True}
+
+    @app.get("/api/guest/rooms")
+    async def guest_rooms(request: Request):
+        """Чаты, в которые этот браузер вошёл по коду (для страницы /get)."""
+        key = request.cookies.get(ROOM_COOKIE)
+        rows = store.q("SELECT * FROM rooms WHERE guest_hash=? ORDER BY last_activity DESC", token_hash(key)) if key else []
+        return {"rooms": [room_guest_summary(r) for r in rows]}
+
+    def invite_by_token(token: str) -> sqlite3.Row:
+        room = store.one("SELECT * FROM rooms WHERE invite_token=?", store.keyed_hash(token)) if token else None
+        if not room or room["invite_expires"] < time.time():
+            raise HTTPException(404, "Приглашение не работает: его уже использовали или прошли сутки. "
+                                     "Попроси новый код")
+        return room
+
+    @app.get("/api/rooms/invite/{token}")
+    async def room_invite_info(token: str, request: Request):
+        limiter.hit(f"code:{client_ip(request)}", 30, 600)
+        room = invite_by_token(token)
+        return {"owner_name": room["owner_name"], "mine": room_side(room, request.cookies) == "owner"}
+
+    @app.post("/api/rooms/join")
+    async def room_join(request: Request):
+        check_origin(request.headers)
+        limiter.hit(f"code:{client_ip(request)}", 30, 600)
+        body = await request.json()
+        token = body.get("token") if isinstance(body, dict) and isinstance(body.get("token"), str) else ""
+        return await join_room(invite_by_token(token), request)
+
+    def room_file_row(mid: str, request: Request) -> sqlite3.Row:
+        row = store.one("SELECT * FROM room_messages WHERE id=? AND kind!='text' AND done IS NOT NULL", mid)
+        room = store.one("SELECT * FROM rooms WHERE id=?", row["room_id"]) if row else None
+        if not room or not room_side(room, request.cookies):
+            raise HTTPException(404, "Файл не найден")
+        if row["expired"]:
+            raise HTTPException(410, f"Файл удалён: файлы в чате хранятся {settings.transfer_ttl_hours} ч")
+        return row
+
+    @app.get("/r/{mid}")
+    async def room_file(mid: str, request: Request, dl: int = 0):
+        row = room_file_row(mid, request)
+        mime = row["mime"] or "application/octet-stream"
+        inline_ok = viewable(mime) and not dl
+        if not viewable(mime):
+            mime = "application/octet-stream"
+        headers = {}
+        if (policy := file_csp(mime)) is not None:
+            headers["Content-Security-Policy"] = policy
+        return FileResponse(store.room_path(mid), media_type=mime, filename=row["name"],
+                            content_disposition_type="inline" if inline_ok else "attachment", headers=headers)
+
+    @app.get("/r/{mid}/preview")
+    async def room_file_preview(mid: str, request: Request):
+        """Word/Excel/PowerPoint из чата с человеком — просмотр как PDF."""
+        try:
+            row = room_file_row(mid, request)
+        except HTTPException as exc:
+            return PlainTextResponse(exc.detail, exc.status_code)
+        if convert_to(row["name"], row["mime"]) != "pdf":
+            return PlainTextResponse("Этот файл нельзя показать как PDF", 404)
+        if row["size"] > settings.tool_max_mb * MB:
+            return PlainTextResponse(f"Файл больше {settings.tool_max_mb} МБ — его можно только скачать", 413)
+        cached = store.room_preview_path(mid)
+        async with store.preview_locks[mid]:
+            if not cached.exists():
+                limiter.hit(f"tool:room:{row['room_id']}", settings.tools_per_min, 60)
+                work = store.tmp_root / uuid.uuid4().hex
+                try:
+                    (out,) = await run_converter("office-pdf", [(store.room_path(mid), row["name"], row["mime"])], {}, work)
+                    out.replace(cached)
+                except HTTPException as exc:
+                    return PlainTextResponse(f"Не получилось показать документ: {exc.detail}", exc.status_code)
+                finally:
+                    shutil.rmtree(work, ignore_errors=True)
+        store.preview_locks.pop(mid, None)
+        return FileResponse(cached, media_type="application/pdf", filename=f"{stem(row['name'])}.pdf",
+                            content_disposition_type="inline")
+
+    async def room_socket(websocket: WebSocket) -> None:
+        rid = websocket.query_params.get("room", "")
+        room = store.one("SELECT * FROM rooms WHERE id=?", rid)
+        side = room_side(room, websocket.cookies) if room else None
+        await websocket.accept()
+        if not side:
+            await websocket.send_json({"type": "closed", "reason": "unauthorized"})
+            await websocket.close(code=4401)
+            return
+        store.room_sockets[rid][websocket] = side
+
+        async def announce():
+            await room_presence(rid)
+            await store.to_account(room["account_id"], {"type": "rooms_changed"})
+
+        await announce()
+        try:
+            while True:
+                await websocket.receive_text()  # пинги от браузера держат соединение
+        except WebSocketDisconnect:
+            pass
+        finally:
+            pool = store.room_sockets.get(rid)
+            if pool is not None:
+                pool.pop(websocket, None)
+                if not pool:
+                    store.room_sockets.pop(rid, None)
+            if store.one("SELECT 1 FROM rooms WHERE id=?", rid):
+                await announce()
+
     # ---------- получатель (без регистрации)
 
     @app.get("/get", include_in_schema=False)
@@ -2014,6 +2599,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raw = body.get("code") if isinstance(body, dict) and isinstance(body.get("code"), str) else ""
         code = re.sub(r"\D", "", raw)
         row = store.one("SELECT * FROM shares WHERE code_hash=?", store.keyed_hash(code)) if len(code) == 9 else None
+        if not row and len(code) == 9:  # может быть, это приглашение в чат
+            room = store.one("SELECT * FROM rooms WHERE invite_code=?", store.keyed_hash(code))
+            if room and room["invite_expires"] > time.time():
+                return await join_room(room, request)
         if not row or row["expires"] < time.time():
             raise HTTPException(404, "Код не подходит или срок посылки закончился. Проверь цифры")
         # Код подошёл — выдаём личную ссылку получателя (живёт, пока жива посылка).
@@ -2464,10 +3053,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------- уведомления
 
+    def push_owner(request: Request) -> str:
+        role = role_of(request)
+        if role == "pc":
+            return f"dev:{require_pc(request)['id']}"
+        if role == "phone":
+            return f"acc:{require_phone(request)['id']}"
+        # Страница чата с человеком: владелец — как его телефон/компьютер, собеседник — по своему ключу.
+        if acc := store.account_by_token(request.cookies.get(PHONE_COOKIE)):
+            return f"acc:{acc['id']}"
+        if (dev := store.device_by_token(request.cookies.get(PC_COOKIE))) and dev["account_id"]:
+            return f"dev:{dev['id']}"
+        key = request.cookies.get(ROOM_COOKIE)
+        if key and store.one("SELECT 1 FROM rooms WHERE guest_hash=?", token_hash(key)):
+            return f"guest:{token_hash(key)}"
+        raise not_linked
+
     @app.post("/api/push/subscribe")
     async def push_subscribe(request: Request):
-        role = role_of(request)
-        owner = f"dev:{require_pc(request)['id']}" if role == "pc" else f"acc:{require_phone(request)['id']}"
+        owner = push_owner(request)
         body = await request.json()
         try:
             endpoint = body["endpoint"]
@@ -2484,8 +3088,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/push/unsubscribe")
     async def push_unsubscribe(request: Request):
-        role = role_of(request)
-        owner = f"dev:{require_pc(request)['id']}" if role == "pc" else f"acc:{require_phone(request)['id']}"
+        owner = push_owner(request)
         body = await request.json()
         endpoint = body.get("endpoint") if isinstance(body, dict) else None
         store.run("DELETE FROM push_subs WHERE endpoint=? AND owner=?", endpoint, owner)
@@ -2501,6 +3104,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await websocket.close(code=4403)  # чужой сайт — даже не открываем соединение
             return
         role = websocket.query_params.get("role")
+        if role == "room":
+            await room_socket(websocket)
+            return
         dev = acc = None
         if role == "pc":
             dev = store.device_by_token(websocket.cookies.get(PC_COOKIE))

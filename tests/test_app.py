@@ -1362,3 +1362,245 @@ def test_google_phone_relinks_old_computer_and_keeps_google(gclient, settings):
     data = new_phone.get("/api/phone/chats").json()
     assert [c["id"] for c in data["chats"]] == [chat_id] and data["account"]["google"] is True
     assert old_phone.get("/api/phone/chats").status_code == 401
+
+
+# ------------------------------------------------- чаты с людьми по коду (v1.7)
+
+
+def as_room(dev: Device) -> Device:
+    """Тот же браузер (те же cookie), но на странице «чата с человеком»."""
+    d = Device(dev.client, "room")
+    d.cookies = dev.cookies
+    return d
+
+
+def new_room(phone: Device, title="Саша", owner_name="Роман") -> tuple[str, str]:
+    r = phone.post("/api/rooms", json={"title": title, "owner_name": owner_name})
+    assert r.status_code == 200, r.text
+    rid = r.json()["room"]["id"]
+    inv = as_room(phone).post(f"/api/rooms/{rid}/invite")
+    assert inv.status_code == 200, inv.text
+    return rid, inv.json()["code"]
+
+
+def join(client, code) -> Device:
+    guest = Device(client, "room")
+    r = guest.post("/api/get/code", json={"code": code})
+    assert r.status_code == 200, r.text
+    assert "pd_rg" in guest.cookies and "HttpOnly" in guest.raw_cookies["pd_rg"]
+    return guest
+
+
+def room_upload(dev: Device, rid: str, data: bytes, name="фото.jpg", mime="image/jpeg", **extra) -> str:
+    f = dev.post(f"/api/rooms/{rid}/files", json={"name": name, "size": len(data), "mime": mime, **extra})
+    assert f.status_code == 200, f.text
+    mid = f.json()["id"]
+    r = dev.request("PUT", f"/api/rooms/{rid}/files/{mid}/data", params={"offset": 0}, content=data,
+                    headers={"Content-Type": "application/octet-stream"})
+    assert r.json()["done"] is True, r.text
+    return mid
+
+
+def test_room_chat_by_code_both_ways(client, pc, phone):
+    pair(pc, phone)
+    sub = {"endpoint": "https://push.example/owner", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+    phone.post("/api/push/subscribe", json=sub)
+    rid, code = new_room(phone)
+    assert len(code.replace(" ", "")) == 9
+    owner = as_room(phone)
+    assert owner.get(f"/api/rooms/{rid}").json()["room"]["joined"] is False
+    guest = join(client, code)
+    state = guest.get(f"/api/rooms/{rid}").json()
+    assert state["room"]["me"] == "guest" and state["room"]["title"] == "Роман"
+    # переписка в обе стороны
+    m1 = guest.post(f"/api/rooms/{rid}/messages", json={"text": "Привет из Москвы"}).json()["message"]
+    assert m1["sender"] == "guest"
+    owner.post(f"/api/rooms/{rid}/messages", json={"text": "Шалом из Израиля"})
+    texts = [(m["sender"], m["text"]) for m in guest.get(f"/api/rooms/{rid}").json()["messages"]]
+    assert texts == [("guest", "Привет из Москвы"), ("owner", "Шалом из Израиля")]
+    # список чатов владельца: имя, превью, непрочитанные
+    phone.post(f"/api/rooms/{rid}/read", headers={"X-PD-Role": "room"})
+    guest.post(f"/api/rooms/{rid}/messages", json={"text": "Как дела?"})
+    row = phone.get("/api/rooms").json()["rooms"][0]
+    assert row["title"] == "Саша" and row["joined"] and row["unread"] == 1 and row["last"]["preview"] == "Как дела?"
+    # компьютер владельца видит тот же чат
+    assert as_room(pc).get(f"/api/rooms/{rid}").json()["room"]["me"] == "owner"
+    assert pc.get("/api/rooms").json()["rooms"][0]["id"] == rid
+    # гость видит свои чаты на /get
+    assert guest.get("/api/guest/rooms").json()["rooms"][0]["title"] == "Роман"
+    # уведомление владельцу
+    client.portal.call(store(client).flush_push)
+    assert "Как дела?" in "".join(d for e, d in client.pusher.sent if e == sub["endpoint"])
+    # код одноразовый
+    assert Device(client, "room").post("/api/get/code", json={"code": code}).status_code == 404
+
+
+def test_room_invite_link_is_one_time_and_not_eaten_by_preview(client, phone, pc):
+    pair(pc, phone)
+    rid = phone.post("/api/rooms", json={"title": "Аня"}).json()["room"]["id"]
+    link = as_room(phone).post(f"/api/rooms/{rid}/invite").json()["link"]
+    token = link.rsplit("/", 1)[1]
+    guest = Device(client, "room")
+    assert guest.get(f"/j/{token}").status_code == 200          # превью ссылки ничего не тратит
+    assert guest.get(f"/api/rooms/invite/{token}").json()["owner_name"] == "PhoneDrop"
+    # владелец не может «войти» в собственный чат как гость
+    assert as_room(phone).post("/api/rooms/join", json={"token": token}).status_code == 400
+    assert guest.post("/api/rooms/join", json={"token": token}).json()["room"] == rid
+    assert Device(client, "room").post("/api/rooms/join", json={"token": token}).status_code == 404
+
+
+def test_room_files_up_to_big_sizes_chunked_and_private(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest, owner = join(client, code), as_room(phone)
+    data = b"x" * 3000
+    f = guest.post(f"/api/rooms/{rid}/files", json={"name": "видео.mp4", "size": len(data), "mime": "video/mp4"}).json()
+    put = lambda off, chunk: guest.request("PUT", f"/api/rooms/{rid}/files/{f['id']}/data", params={"offset": off},
+                                           content=chunk, headers={"Content-Type": "application/octet-stream"})
+    assert put(0, data[:1000]).json() == {"received": 1000, "done": False}
+    # недогруженный файл в чате не виден, но виден отправителю (можно продолжить после перезагрузки)
+    assert owner.get(f"/api/rooms/{rid}").json()["messages"] == []
+    assert guest.get(f"/api/rooms/{rid}").json()["uploads"][0]["received"] == 1000
+    assert owner.request("PUT", f"/api/rooms/{rid}/files/{f['id']}/data", params={"offset": 1000},
+                         content=data[1000:]).status_code == 404      # грузить в чужой файл нельзя
+    r = put(0, data[:1000])
+    assert r.status_code == 409 and r.json()["received"] == 1000     # не то место — сервер подскажет нужное
+    assert put(1000, data[1000:]).json()["done"] is True
+    m = owner.get(f"/api/rooms/{rid}").json()["messages"][0]
+    assert m["name"] == "видео.mp4" and m["url"] == f"/r/{f['id']}" and "expires" in m
+    got = phone.get(m["url"])
+    assert got.content == data and got.headers["content-type"] == "video/mp4"
+    part = guest.get(m["url"], headers={"Range": "bytes=100-199"})
+    assert part.status_code == 206 and part.content == data[100:200]   # докачка
+    # посторонний и другой аккаунт не скачают
+    assert Device(client, "room").get(m["url"]).status_code == 404
+    other = Device(client, "phone")
+    pair(Device(client, "pc"), other)
+    assert other.get(m["url"]).status_code == 404
+    assert as_room(other).get(f"/api/rooms/{rid}").status_code == 404
+    # опасный тип не откроется в браузере
+    mid = room_upload(guest, rid, b"<script>alert(1)</script>", name="x.html", mime="text/html")
+    r = phone.get(f"/r/{mid}")
+    assert r.headers["content-type"].startswith("application/octet-stream") and "attachment" in r.headers["content-disposition"]
+    # голосовое
+    vid = room_upload(owner, rid, b"OggS" + b"0" * 50, name="voice.ogg", mime="audio/ogg", kind="voice", duration=3.2)
+    v = [x for x in guest.get(f"/api/rooms/{rid}").json()["messages"] if x["id"] == vid][0]
+    assert v["kind"] == "voice" and v["duration"] == 3.2
+
+
+def test_room_files_expire_after_a_day_text_stays(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest = join(client, code)
+    guest.post(f"/api/rooms/{rid}/messages", json={"text": "держи файл"})
+    mid = room_upload(guest, rid, b"12345", name="doc.pdf", mime="application/pdf")
+    s = store(client)
+    assert s.room_path(mid).exists()
+    s.run("UPDATE room_messages SET done=done-?, created=created-? WHERE id=?", 25 * 3600, 25 * 3600, mid)
+    client.portal.call(s.cleanup)
+    assert not s.room_path(mid).exists()
+    msgs = guest.get(f"/api/rooms/{rid}").json()["messages"]
+    assert [m.get("text") for m in msgs if m["kind"] == "text"] == ["держи файл"]
+    assert [m.get("expired") for m in msgs if m["kind"] == "file"] == [True]
+    assert phone.get(f"/r/{mid}").status_code == 410
+    # недокачанное старше суток тоже удаляется
+    f = guest.post(f"/api/rooms/{rid}/files", json={"name": "big.zip", "size": 100}).json()
+    s.run("UPDATE room_messages SET created=created-? WHERE id=?", 25 * 3600, f["id"])
+    client.portal.call(s.cleanup)
+    assert not s.room_path(f["id"]).exists()
+    assert s.one("SELECT 1 FROM room_messages WHERE id=?", f["id"]) is None
+
+
+def test_room_security(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest, owner = join(client, code), as_room(phone)
+    om = owner.post(f"/api/rooms/{rid}/messages", json={"text": "моё"}).json()["message"]
+    # только создатель управляет чатом
+    assert guest.post(f"/api/rooms/{rid}/invite").status_code == 403
+    assert guest.delete(f"/api/rooms/{rid}").status_code == 403
+    assert guest.post(f"/api/rooms/{rid}/rename", json={"title": "x"}).status_code == 403
+    # чужое сообщение удалить нельзя, своё — можно
+    assert guest.delete(f"/api/rooms/{rid}/messages/{om['id']}").status_code == 403
+    gm = guest.post(f"/api/rooms/{rid}/messages", json={"text": "ой"}).json()["message"]
+    assert guest.delete(f"/api/rooms/{rid}/messages/{gm['id']}").status_code == 200
+    # посторонний ничего не видит; без заголовка и с чужого сайта — отказ
+    assert Device(client, "room").get(f"/api/rooms/{rid}").status_code == 404
+    assert guest.get(f"/api/rooms/{rid}", headers={"X-PD-Role": None}).status_code == 400
+    assert guest.post(f"/api/rooms/{rid}/messages", json={"text": "x"},
+                      headers={"Origin": "https://evil.example"}).status_code == 403
+    # гость не может создавать чаты (нужен аккаунт)
+    assert Device(client, "phone").post("/api/rooms", json={"title": "x"}).status_code == 401
+    # перебор кодов ограничен
+    stranger = Device(client, "room")
+    codes = [stranger.post("/api/get/code", json={"code": "000000001"}).status_code for _ in range(12)]
+    assert 429 in codes
+    # в базе — только отпечатки ключа гостя и кода
+    row = store(client).one("SELECT * FROM rooms WHERE id=?", rid)
+    assert guest.cookies["pd_rg"] not in json.dumps(dict(row))
+    assert row["invite_code"] is None
+
+
+def test_room_new_code_replaces_guest_and_guest_can_leave(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    first = join(client, code)
+    inv = as_room(phone).post(f"/api/rooms/{rid}/invite").json()
+    assert inv["replaces"] is True
+    second = join(client, inv["code"])
+    assert first.get(f"/api/rooms/{rid}").status_code == 404     # старый вход больше не работает
+    assert second.get(f"/api/rooms/{rid}").status_code == 200
+    assert second.post(f"/api/rooms/{rid}/leave").status_code == 200
+    assert second.get(f"/api/rooms/{rid}").status_code == 404
+    assert phone.get("/api/rooms").json()["rooms"][0]["joined"] is False
+
+
+def test_room_close_and_idle_cleanup(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest = join(client, code)
+    mid = room_upload(guest, rid, b"abc")
+    s = store(client)
+    assert as_room(phone).delete(f"/api/rooms/{rid}").status_code == 200
+    assert not s.room_path(mid).exists()
+    assert guest.get(f"/api/rooms/{rid}").status_code == 404
+    # чат без активности 30 дней закрывается сам
+    rid2, code2 = new_room(phone, title="Пётр")
+    join(client, code2)
+    s.run("UPDATE rooms SET last_activity=last_activity-? WHERE id=?", 31 * 86400, rid2)
+    client.portal.call(s.cleanup)
+    assert phone.get("/api/rooms").json()["rooms"] == []
+
+
+def test_room_websocket_live_and_guest_push(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest, owner = join(client, code), as_room(phone)
+    sub = {"endpoint": "https://push.example/guest", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+    assert guest.post("/api/push/subscribe", json=sub).status_code == 200
+    with client.websocket_connect(f"/ws?role=room&room={rid}", headers=guest.headers()) as gws:
+        assert gws.receive_json()["type"] == "presence"
+        with client.websocket_connect(f"/ws?role=room&room={rid}", headers=owner.headers()) as ows:
+            ows.receive_json()
+            assert gws.receive_json()["owner_online"] is True
+            owner.post(f"/api/rooms/{rid}/messages", json={"text": "онлайн"})
+            msg = gws.receive_json()
+            assert msg["type"] == "message" and msg["message"]["text"] == "онлайн"
+    # гость не в чате — получит push
+    owner.post(f"/api/rooms/{rid}/messages", json={"text": "ты где?"})
+    client.portal.call(store(client).flush_push)
+    assert "ты где?" in "".join(d for e, d in client.pusher.sent if e == sub["endpoint"])
+    # постороннего в сокет не пускают
+    with client.websocket_connect(f"/ws?role=room&room={rid}", headers=Device(client, "room").headers()) as ws:
+        assert ws.receive_json() == {"type": "closed", "reason": "unauthorized"}
+
+
+def test_guest_home_redirects_to_his_chats(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest = join(client, code)
+    r = guest.get("/")
+    assert r.status_code == 302 and r.headers["location"] == "/get"
+    assert guest.get("/chat").headers["location"] == "/get"
+    assert guest.get(f"/room/{rid}").status_code == 200
+    assert phone.get("/chat").status_code == 200     # у владельца — обычное приложение

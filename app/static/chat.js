@@ -172,10 +172,21 @@ window.PD = (() => {
     toast("Файл готов — нажми «Поделиться» ещё раз");
   }
 
+  // Сколько осталось жить файлу: «⏳ 23 ч» (файлы в чате с человеком хранятся сутки).
+  function fmtLeft(expires) {
+    const min = (expires * 1000 - Date.now()) / 60000;
+    if (min <= 0) return "удаляется";
+    return min >= 60 ? `удалится через ${Math.floor(min / 60)} ч` : `удалится через ${Math.max(1, Math.round(min))} мин`;
+  }
+
+  // Чат. Подходит и для «телефон ↔ компьютер», и для «чата с человеком» (room.js):
+  // там переопределены отправка (sendText, sendFiles, sendVoice), удаление и адрес WebSocket.
   class Chat {
     constructor(opts) {
       this.opts = opts;
-      this.role = opts.role;
+      this.role = opts.role;           // заголовок X-PD-Role для запросов
+      this.me = opts.me || opts.role;  // какие сообщения «мои» (справа)
+      this.mobile = opts.mobile ?? opts.role === "phone";
       this.chatId = opts.chatId || null; // какой чат сейчас открыт
       this.maxUploadMb = 500;
       this.list = $("messages");
@@ -203,15 +214,18 @@ window.PD = (() => {
     add(m, animate = true) {
       if ($("m-" + m.id)) return;
       const day = dayLabel(m.created);
+      // Пока что-то отправляется, новые сообщения встают над «полосками отправки».
+      const anchor = this.list.querySelector(".msg.pending");
+      const place = (n) => (anchor ? this.list.insertBefore(n, anchor) : this.list.append(n));
       if (day !== this.lastDay) {
-        this.list.append(el("div", { class: "day" }, day));
+        place(el("div", { class: "day" }, day));
         this.lastDay = day;
       }
       const node = this.render(m);
       if (!animate) node.style.animation = "none";
-      this.list.append(node);
+      place(node);
       this.updateEmpty();
-      this.scrollDown(m.sender === this.role);
+      this.scrollDown(m.sender === this.me);
     }
 
     remove(id) {
@@ -230,7 +244,7 @@ window.PD = (() => {
     }
 
     render(m) {
-      const mine = m.sender === this.role;
+      const mine = m.sender === this.me;
       const bubble = el("div", { class: "bubble kind-" + m.kind });
       const actions = el("div", { class: "actions" });
 
@@ -284,18 +298,22 @@ window.PD = (() => {
             m.convert_to === "pdf" ? "В PDF" : "В JPG");
           actions.append(btn);
         }
-        if (this.role === "phone" && canShareFiles) {
+        if (this.mobile && canShareFiles) {
           actions.append(el("button", { type: "button",
             onclick: () => shareFiles([{ url: m.url, name: m.name, mime: m.mime }]) }, "Поделиться"));
         }
-        if (IMG_RE.test(mime) && window.ClipboardItem && this.role === "pc") {
+        if (IMG_RE.test(mime) && window.ClipboardItem && !this.mobile) {
           actions.append(el("button", { type: "button", onclick: () => copyImage(m.url) }, "Копировать картинку"));
         }
       }
 
-      actions.append(el("button", { type: "button", class: "del", onclick: () => this.deleteMessage(m.id) }, "Удалить"));
+      if (this.canDelete(m)) {
+        actions.append(el("button", { type: "button", class: "del", onclick: () => this.deleteMessage(m.id) }, "Удалить"));
+      }
       bubble.append(actions);
-      bubble.append(el("div", { class: "meta" }, fmtTime(m.created), mine ? el("span", { class: "tick" }, "✓✓") : null));
+      bubble.append(el("div", { class: "meta" },
+        m.expires && !m.expired ? el("span", { class: "ttl", title: "Файлы в этом чате хранятся сутки" }, "⏳ " + fmtLeft(m.expires)) : null,
+        fmtTime(m.created), mine ? el("span", { class: "tick" }, "✓✓") : null));
       return el("div", { class: "msg " + (mine ? "out" : "in"), id: "m-" + m.id }, bubble);
     }
 
@@ -314,9 +332,12 @@ window.PD = (() => {
       }
     }
 
+    canDelete() { return true; }
+    deleteUrl(id) { return "/api/messages/" + id; }
+
     async deleteMessage(id) {
       try {
-        await api(this.role, "/api/messages/" + id, { method: "DELETE" });
+        await api(this.role, this.deleteUrl(id), { method: "DELETE" });
         this.remove(id);
       } catch (e) {
         toast(e.message, true);
@@ -477,10 +498,7 @@ window.PD = (() => {
         if (!this.rec.send || seconds < 0.7) return;
         const type = (recorder.mimeType || mimeType || "audio/webm").split(";")[0];
         const blob = new Blob(chunks, { type });
-        const fd = new FormData();
-        fd.append("voice", blob, "voice." + (type.includes("mp4") ? "m4a" : type.split("/")[1]));
-        fd.append("duration", seconds.toFixed(1));
-        this.upload(fd, "голосовое " + fmtDuration(seconds));
+        this.sendVoice(blob, "voice." + (type.includes("mp4") ? "m4a" : type.split("/")[1]), seconds);
       };
       recorder.start();
       $("composer").hidden = true;
@@ -491,6 +509,13 @@ window.PD = (() => {
         $("recTime").textContent = fmtDuration(s);
         if (s >= 300) this.stopRecording(true); // не больше 5 минут
       }, 250);
+    }
+
+    sendVoice(blob, name, seconds) {
+      const fd = new FormData();
+      fd.append("voice", blob, name);
+      fd.append("duration", seconds.toFixed(1));
+      this.upload(fd, "голосовое " + fmtDuration(seconds));
     }
 
     stopRecording(send) {
@@ -504,7 +529,7 @@ window.PD = (() => {
       this.stopped = false;
       if (this.ws) { this.ws.onclose = null; this.ws.close(); }
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${location.host}/ws?role=${this.role}`);
+      const ws = new WebSocket(`${proto}://${location.host}${this.wsPath()}`);
       this.ws = ws;
       ws.onopen = () => {
         this.delay = 1000;
@@ -519,7 +544,7 @@ window.PD = (() => {
         const current = !msg.chat_id || msg.chat_id === this.chatId;
         if (msg.type === "message" && current) {
           this.add(msg.message);
-          if (msg.message.sender !== this.role) this.notify();
+          if (msg.message.sender !== this.me) this.notify();
         } else if (msg.type === "deleted" && current) {
           this.remove(msg.id);
         } else if (msg.type === "closed") {
@@ -539,6 +564,8 @@ window.PD = (() => {
       };
     }
 
+    wsPath() { return `/ws?role=${this.role}`; }
+
     stop() {
       this.stopped = true;
       clearInterval(this.ping);
@@ -550,7 +577,7 @@ window.PD = (() => {
         this.unread++;
         document.title = `(${this.unread}) PhoneDrop`;
       }
-      if (this.role === "phone" && navigator.vibrate) navigator.vibrate(60);
+      if (this.mobile && navigator.vibrate) navigator.vibrate(60);
     }
   }
 
@@ -605,5 +632,5 @@ window.PD = (() => {
     },
   };
 
-  return { $, el, toast, api, fmtSize, fmtTime, Chat, push, canShareFiles, shareFiles, prefetchShare };
+  return { $, el, toast, api, fmtSize, fmtTime, fmtDuration, dayLabel, copyText, Chat, push, canShareFiles, shareFiles, prefetchShare };
 })();

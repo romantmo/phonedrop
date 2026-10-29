@@ -10,7 +10,8 @@
   let openId = null;
   let installEvent = null;
   let reloadTimer = null;
-  let tab = "chats"; // вкладка на главном экране: «Компьютеры» или «Инструменты»
+  let peopleMounted = false;
+  let tab = "chats"; // вкладка на главном экране: «Компьютеры», «Люди» или «Инструменты»
 
   const chat = new Chat({
     role: ROLE,
@@ -31,7 +32,7 @@
     $("chatView").hidden = $("toolView").hidden = true;
     $("listView").hidden = false;
     $("chatList").hidden = $("fabScan").hidden = $("pushBanner").hidden = $("googleBanner").hidden = true;
-    $("tabs").hidden = $("toolsHome").hidden = true;
+    $("tabs").hidden = $("toolsHome").hidden = $("peopleHome").hidden = true;
     $("gate").hidden = false;
     $("gateTitle").textContent = title || "Добро пожаловать";
     $("gateText").textContent = text || "Войди через Google — и пользуйся без компьютера. Или открой PhoneDrop на своём компьютере и отсканируй QR-код.";
@@ -57,7 +58,7 @@
 
   function setTab(name) {
     tab = name;
-    for (const [id, value] of [["tabChats", "chats"], ["tabTools", "tools"]]) {
+    for (const [id, value] of [["tabChats", "chats"], ["tabPeople", "people"], ["tabTools", "tools"]]) {
       $(id).classList.toggle("on", tab === value);
       $(id).setAttribute("aria-selected", String(tab === value));
     }
@@ -65,20 +66,29 @@
   }
   $("tabChats").addEventListener("click", () => setTab("chats"));
   $("tabTools").addEventListener("click", () => setTab("tools"));
+  $("tabPeople").addEventListener("click", () => setTab("people"));
+  PDPeople.onUnread((n) => { $("peDot").hidden = !n; });
 
   function renderList() {
     $("gate").hidden = true;
     $("tabs").hidden = false;
     const tools = tab === "tools";
+    const people = tab === "people";
     $("toolsHome").hidden = !tools;
-    $("chatList").hidden = $("fabScan").hidden = tools;
+    $("peopleHome").hidden = !people;
+    $("chatList").hidden = $("fabScan").hidden = tools || people;
+    $("listView").querySelector(".status").textContent = people ? "переписка с людьми" : tools ? "инструменты" : "мои компьютеры";
     const acc = info && info.account;
     $("googleBanner").hidden = !(info && info.google && acc && !acc.google);
-    $("pushBanner").hidden = tools || !$("googleBanner").hidden || !(chats.length && push.status() === "default");
+    $("pushBanner").hidden = tools || people || !$("googleBanner").hidden || !(chats.length && push.status() === "default");
     $("menuAccount").hidden = !(info && info.google);
     $("menuAccount").textContent = acc && acc.google ? `👤 ${acc.email} · выйти` : "🔐 Привязать Google";
     if (tools) {
       PDTools.renderHome($("toolsHome"), (id) => openTool(id));
+      return;
+    }
+    if (people) {
+      if (!peopleMounted) { PDPeople.mount($("peopleHome")); peopleMounted = true; }
       return;
     }
     const list = $("chatList");
@@ -198,6 +208,8 @@
       reloadSoon();
     } else if (msg.type === "shares_changed") {
       PDShares.refresh();  // кто-то скачал файл из посылки
+    } else if (msg.type === "rooms_changed") {
+      PDPeople.refreshSoon();  // новое сообщение в чате с человеком
     }
   }
 
@@ -253,6 +265,11 @@
     }
     chat.connect();
     push.sync(ROLE, info.vapid_key);
+    PDPeople.refresh();  // красная точка на «Люди», если есть непрочитанные
+    if (params.get("tab") === "people") {
+      history.replaceState(null, "", "/chat");
+      setTab("people");
+    }
     const shared = params.get("shared");
     const toolId = params.get("t");
     if (toolId && PDTools.has(toolId)) {

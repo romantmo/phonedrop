@@ -41,8 +41,9 @@
     </nav>
 
     <div class="tabs" id="tabs" role="tablist" hidden>
-      <button type="button" role="tab" id="tabChats" class="on" aria-selected="true">💻 Компьютеры</button>
-      <button type="button" role="tab" id="tabTools" aria-selected="false">🛠 Инструменты</button>
+      <button type="button" role="tab" id="tabChats" class="on" aria-selected="true"><span class="ti">💻</span>Компьютеры</button>
+      <button type="button" role="tab" id="tabPeople" aria-selected="false"><span class="ti">👥</span>Люди<span class="tab-dot" id="peDot" hidden></span></button>
+      <button type="button" role="tab" id="tabTools" aria-selected="false"><span class="ti">🛠</span>Инструменты</button>
     </div>
 
     <div class="banner" id="googleBanner" hidden>
@@ -57,6 +58,7 @@
 
     <div class="chat-list" id="chatList"></div>
     <div class="tools-home" id="toolsHome" hidden></div>
+    <div class="people-home" id="peopleHome" hidden></div>
 
     <div class="gate" id="gate" hidden>
       <div class="card">
@@ -220,6 +222,7 @@
 <script src="/static/shares.js"></script>
 <script src="/static/scanner.js"></script>
 <script src="/static/tools.js"></script>
+<script src="/static/people.js"></script>
 <script src="/static/phone.js"></script>
 </body>
 </html>

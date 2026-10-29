@@ -21,6 +21,7 @@
     <nav class="tabs" id="tabs" role="tablist" hidden>
       <button type="button" role="tab" id="tabChat" class="on" aria-selected="true"><span class="ti">💬</span>Чат</button>
       <button type="button" role="tab" id="tabTools" aria-selected="false"><span class="ti">🛠</span>Инструменты</button>
+      <button type="button" role="tab" id="tabPeople" aria-selected="false"><span class="ti">👥</span>Люди<span class="tab-dot" id="peDot" hidden></span></button>
       <button type="button" role="tab" id="tabTransfers" aria-selected="false"><span class="ti">📦</span>Передачи<span class="tab-dot" id="trDot" hidden></span></button>
     </nav>
 
@@ -108,6 +109,18 @@
     </footer>
 
     <div class="drop-overlay" id="dropOverlay" hidden>Отпусти, чтобы отправить на телефон</div>
+  </main>
+
+  <!-- ===== Люди: чаты с людьми по коду ===== -->
+  <main class="tools-main" id="peopleMain" hidden>
+    <header class="chat-head">
+      <div class="avatar tool-ico">👥</div>
+      <div class="who">
+        <div class="name">Чаты с людьми</div>
+        <div class="status">Переписка и файлы до 10 ГБ с кем угодно — по коду, без регистрации</div>
+      </div>
+    </header>
+    <div class="people-home pc-people" id="peopleHome"></div>
   </main>
 
   <!-- ===== Передачи: большие файлы между моими компьютерами ===== -->
@@ -246,6 +259,7 @@
 <script src="/static/scanner.js"></script>
 <script src="/static/tools.js"></script>
 <script src="/static/transfers.js"></script>
+<script src="/static/people.js"></script>
 <script src="/static/desktop.js"></script>
 </body>
 </html>

@@ -19,15 +19,21 @@
   <img class="logo" src="/static/icons/icon-192.png" alt="">
   <div class="who">
     <div class="name">PhoneDrop</div>
-    <div class="status">обмен файлами по коду</div>
+    <div class="status">чаты и файлы по коду</div>
   </div>
 </header>
 
 <main class="g-main">
+  <!-- Чаты, в которые этот браузер уже вошёл по коду -->
+  <section class="g-card g-rooms" id="roomsCard" hidden>
+    <h1>💬 Твои чаты</h1>
+    <div class="g-list" id="roomsList"></div>
+  </section>
+
   <!-- Ввод кода -->
   <section class="g-card" id="codeCard" hidden>
     <h1>🔑 Введи код</h1>
-    <p>Код из 9 цифр, который тебе продиктовали или прислали: по нему можно получить файлы или отправить их.</p>
+    <p>Код из 9 цифр, который тебе продиктовали или прислали: по нему можно войти в чат, получить файлы или отправить их. Регистрация не нужна.</p>
     <form id="codeForm" autocomplete="off">
       <input id="codeInput" inputmode="numeric" maxlength="11" placeholder="123 456 789" aria-label="Код" autofocus>
       <button class="btn primary block" type="submit">Открыть</button>
@@ -73,6 +79,7 @@
   </section>
 
   <p class="g-foot">🔒 Файлы хранятся не дольше суток и потом удаляются автоматически.</p>
+  <p class="g-foot"><a href="/chat?app=1">У меня есть свой аккаунт PhoneDrop</a></p>
 </main>
 
 <script src="/static/chat.js"></script>
