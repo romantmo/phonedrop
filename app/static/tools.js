@@ -20,11 +20,6 @@ window.PDTools = (() => {
       action: "Сделать PDF",
     },
     {
-      id: "share", custom: "share", phoneOnly: true, icon: "🌍", title: "Обмен по коду",
-      sub: "Отправить или получить файлы от любого человека",
-      hint: "Файлы до 10 ГБ в обе стороны. Человек открывает ссылку или вводит код на сайте — без регистрации.",
-    },
-    {
       id: "office", op: "office-pdf", icon: "📄", title: "Документ → PDF",
       sub: "Word, Excel, PowerPoint",
       hint: "Выбери файл Word, Excel или PowerPoint — получишь PDF, который откроется на любом устройстве.",
@@ -100,11 +95,7 @@ window.PDTools = (() => {
     $("toolTitle").textContent = tool.title;
     $("toolSub").textContent = tool.sub;
     $("toolHint").textContent = tool.hint + (ON_PC ? " Файлы можно перетащить мышкой в это окно или вставить Ctrl+V." : "");
-    // «Посылка» — свой экран (shares.js), обычные части инструмента прячем.
-    const custom = !!tool.custom;
-    for (const id of ["toolFiles", "toolAdd", "toolFoot"]) $(id).hidden = custom;
-    $("shareBox").hidden = !custom;
-    if (custom) { PDShares.mount($("shareBox")); }
+    for (const id of ["toolFiles", "toolAdd", "toolFoot"]) $(id).hidden = false;
     $("toolCamera").hidden = !tool.camera || ON_PC;
     $("toolPick").textContent = tool.camera && !ON_PC ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
     $("toolSendPc").textContent = ON_PC ? "📱 На телефон" : "💻 На компьютер";

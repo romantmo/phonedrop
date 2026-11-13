@@ -1,18 +1,22 @@
-// PhoneDrop — «📦 Передачи»: большие файлы (до 10 ГБ) между моими компьютерами.
+// PhoneDrop — чат «этот компьютер ↔ другой мой компьютер»: большие файлы (до 10 ГБ).
 // Файл режется на части по 8 МБ и уходит на сервер по очереди. Оборвалась связь —
 // повторяем с того места, где остановились. Закрыли вкладку — выбираешь тот же файл
 // ещё раз, и загрузка продолжается. На сервере файл живёт сутки.
 "use strict";
 
-window.PDTransfers = (() => {
-  const { $, el, toast, api, fmtSize } = PD;
+window.PDPcChat = (() => {
+  const { $, el, toast, api, fmtSize, fmtTime } = PD;
   const ROLE = "pc";
-  let info = null;        // лимиты с сервера
-  let devices = [];
-  let target = null;      // id компьютера-получателя
-  let picked = [];        // выбранные, но ещё не отправленные файлы
-  const active = new Map(); // id передачи → состояние загрузки
+  let info = null;            // ответ /api/transfers: входящие, исходящие, лимиты
+  let devices = [];           // другие мои компьютеры
+  let peer = null;            // id компьютера, чат с которым открыт (null — закрыт)
+  const unread = new Set();   // компьютеры, от которых пришло новое, пока их чат был закрыт
+  const active = new Map();   // id передачи → её загрузка (PDUpload.ChunkUpload)
+  let lastIn = null;
+  const listeners = [];
   let onNew = () => {};
+
+  const changed = () => listeners.forEach((fn) => fn());
 
   function fmtLeft(expires) {
     const h = Math.max(0, (expires * 1000 - Date.now()) / 3600e3);
@@ -20,116 +24,94 @@ window.PDTransfers = (() => {
   }
 
   // ---------- данные с сервера
-  let lastIn = null;
   async function refresh() {
     try {
       const [list, devs] = await Promise.all([api(ROLE, "/api/transfers"), api(ROLE, "/api/pc/devices")]);
       info = list;
       devices = devs.devices;
-      if (!devices.some((d) => d.id === target)) target = devices[0] ? devices[0].id : null;
-      const inIds = list.incoming.map((t) => t.id);
       if (lastIn) {
-        const fresh = list.incoming.filter((t) => !lastIn.includes(t.id));
-        fresh.forEach((t) => onNew(t));
+        for (const t of list.incoming.filter((x) => !lastIn.includes(x.id))) {
+          if (t.peer !== peer || document.hidden) unread.add(t.peer);
+          onNew(t);
+        }
       }
-      lastIn = inIds;
+      lastIn = list.incoming.map((t) => t.id);
       render();
+      changed();
     } catch (e) {
       if (e.status !== 401) toast(e.message, true);
     }
   }
 
-  // ---------- отрисовка
-  function renderTargets() {
-    const box = $("trTargets");
-    if (!devices.length) {
-      box.replaceChildren(el("p", { class: "tr-empty" },
-        "Других компьютеров пока нет. Открой PhoneDrop на втором компьютере и отсканируй QR-код телефоном — он появится здесь."));
-      return;
-    }
-    box.replaceChildren(...devices.map((d) => el("button", {
-      type: "button", class: "tr-target" + (d.id === target ? " on" : ""),
-      onclick: () => { target = d.id; renderTargets(); updateSend(); },
-    }, el("span", { class: "tr-dot" + (d.online ? " online" : "") }), el("span", {}, d.label),
-    el("small", {}, d.online ? "в сети" : "не в сети — файл дождётся"))));
+  // ---------- лента чата с выбранным компьютером
+  function items() {
+    if (!info || !peer) return [];
+    return [...info.incoming, ...info.outgoing].filter((t) => t.peer === peer).sort((a, b) => a.created - b.created);
   }
 
-  function updateSend() {
-    const btn = $("trSend");
-    const total = picked.reduce((n, f) => n + f.size, 0);
-    btn.disabled = !picked.length || !target;
-    btn.textContent = picked.length ? `Отправить (${picked.length} · ${fmtSize(total)})` : "Отправить";
+  function fileRow(t, status) {
+    const ext = (t.name.includes(".") ? t.name.split(".").pop() : "file").slice(0, 4);
+    const body = [el("div", { class: "ext" }, ext),
+      el("div", { class: "finfo" }, el("div", { class: "fname" }, t.name), el("div", { class: "fsize" }, status))];
+    return t.url && t.direction === "in"
+      ? el("a", { class: "file-row", href: t.url, download: t.name, title: "Скачать" }, ...body)
+      : el("div", { class: "file-row" }, ...body);
   }
 
-  function renderPicked() {
-    $("trPicked").replaceChildren(...picked.map((f, i) => el("div", { class: "tr-row" },
-      el("span", { class: "tr-ico" }, "📄"),
-      el("div", { class: "tr-info" }, el("b", {}, f.name), el("small", {}, fmtSize(f.size))),
-      el("button", { type: "button", class: "tr-x", "aria-label": "Убрать", onclick: () => {
-        picked.splice(i, 1); renderPicked(); updateSend();
-      } }, "✕"))));
-    updateSend();
-  }
-
-  function progressRow(t) {
+  function bubble(t) {
+    const out = t.direction === "out";
     const job = active.get(t.id);
     let status;
-    if (t.done) status = `✅ Доставлено на «${t.to_label}» · ${fmtLeft(t.expires)}`;
+    if (!out) status = `${fmtSize(t.size)} · ${fmtLeft(t.expires)}`;
+    else if (t.done) status = `${fmtSize(t.size)} · ✅ доставлено · ${fmtLeft(t.expires)}`;
     else if (!job) status = "⏸ Загрузка прервана — выбери этот же файл, чтобы продолжить";
     else status = PDUpload.statusText(job, t.size, fmtSize);
-    const actions = [];
-    if (!t.done && job && job.state !== "paused") {
-      actions.push(el("button", { type: "button", class: "btn", onclick: () => pause(t.id) }, "⏸ Пауза"));
-    } else if (!t.done && job) {
-      actions.push(el("button", { type: "button", class: "btn", onclick: () => resume(t) }, "▶ Продолжить"));
-    } else if (!t.done) {
-      actions.push(el("button", { type: "button", class: "btn", onclick: () => pickToResume(t) }, "📂 Выбрать файл"));
+    const actions = el("div", { class: "actions" });
+    if (!out) actions.append(el("a", { href: t.url, download: t.name }, "Скачать"));
+    if (out && !t.done) {
+      if (job && job.state !== "paused") actions.append(el("button", { type: "button", onclick: () => job.pause() }, "⏸ Пауза"));
+      else if (job) actions.append(el("button", { type: "button", onclick: () => resume(t) }, "▶ Продолжить"));
+      else actions.append(el("button", { type: "button", onclick: () => pickToResume(t) }, "📂 Выбрать файл"));
     }
-    actions.push(el("button", { type: "button", class: "btn danger", onclick: () => remove(t) }, "Удалить"));
-    return el("div", { class: "tr-row big", id: "tr-" + t.id },
-      el("span", { class: "tr-ico" }, t.done ? "📦" : "⬆️"),
-      el("div", { class: "tr-info" },
-        el("b", {}, t.name),
-        el("small", {}, `→ ${t.to_label} · ${fmtSize(t.size)}`),
-        t.done ? null : el("div", { class: "progress" }, el("div", { class: "tr-bar" })),
-        el("small", { class: "tr-status" }, status)),
-      el("div", { class: "tr-actions" }, ...actions));
+    actions.append(el("button", { type: "button", class: "del", onclick: () => remove(t) }, out && !t.done ? "Отменить" : "Удалить"));
+    const parts = [fileRow(t, status)];
+    if (out && !t.done) parts.push(el("div", { class: "progress" }, el("div", { class: "tr-bar" })));
+    parts.push(actions, el("div", { class: "meta" }, fmtTime(t.created)));
+    return el("div", { class: "msg " + (out ? "out" : "in"), id: "tr-" + t.id }, el("div", { class: "bubble kind-file" }, ...parts));
   }
 
-  function setBars() {  // ширину полосок ставим через JS (в HTML стилей нет — так требует наша защита CSP)
-    for (const t of info ? info.outgoing : []) {
-      const bar = document.querySelector(`#tr-${t.id} .tr-bar`);
-      const job = active.get(t.id);
-      if (bar) bar.style.width = ((job ? job.received : t.received) / t.size) * 100 + "%";
-    }
+  function setBar(t) {
+    const bar = document.querySelector(`#tr-${t.id} .tr-bar`);
+    const job = active.get(t.id);
+    if (bar) bar.style.width = ((job ? job.received : t.received) / t.size) * 100 + "%";  // CSP: только через JS
   }
 
   function render() {
-    if (!info) return;
-    renderTargets();
-    renderPicked();
-    $("trLimits").textContent = `До ${Math.round(info.max_mb / 1024)} ГБ за файл · хранится ${info.ttl_hours} ч, потом удаляется сам · занято ${fmtSize(info.used)} из ${Math.round(info.quota_mb / 1024)} ГБ`;
-    $("trIn").replaceChildren(...(info.incoming.length ? info.incoming.map((t) => el("div", { class: "tr-row big" },
-      el("span", { class: "tr-ico" }, "📥"),
-      el("div", { class: "tr-info" },
-        el("b", {}, t.name),
-        el("small", {}, `от «${t.from_label}» · ${fmtSize(t.size)} · ${fmtLeft(t.expires)}`)),
-      el("div", { class: "tr-actions" },
-        el("a", { class: "btn primary", href: t.url, download: t.name }, "⬇ Скачать"),
-        el("button", { type: "button", class: "btn danger", onclick: () => remove(t) }, "Удалить"))))
-      : [el("p", { class: "tr-empty" }, "Пока ничего. Отправь файл с другого своего компьютера — он появится здесь.")]));
-    $("trOut").replaceChildren(...(info.outgoing.length ? info.outgoing.map(progressRow)
-      : [el("p", { class: "tr-empty" }, "Ты ещё ничего не отправлял.")]));
-    setBars();
+    if (!peer || !info) return;
+    const d = devices.find((x) => x.id === peer);
+    if (!d) { peer = null; changed(); return; }
+    $("pcPeerName").textContent = d.label;
+    $("pcPeerStatus").textContent = d.online ? "в сети" : "не в сети — файл дождётся";
+    $("pcLimits").textContent = `До ${Math.round(info.max_mb / 1024)} ГБ за файл · хранится ${info.ttl_hours} ч`;
+    const list = $("pcItems");
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 200;
+    const rows = items();
+    list.replaceChildren(...(rows.length ? rows.map(bubble) : [el("div", { class: "empty" },
+      el("div", { class: "big" }, "📦"), el("b", {}, "Пока пусто"),
+      `Перетащи файл в это окно или нажми «📎 Отправить файл» — он придёт на «${d.label}». До 10 ГБ, хранится сутки.`)]));
+    rows.forEach(setBar);
+    if (nearBottom) list.scrollTop = list.scrollHeight;
   }
 
-  // Обновляем только строку загрузки — без перерисовки всего экрана.
+  // Обновляем только одну «полоску» — без перерисовки всей ленты.
   function renderJob(id) {
     const t = info && info.outgoing.find((x) => x.id === id);
-    const row = document.getElementById("tr-" + id);
-    if (!t || !row) return;
-    row.replaceWith(progressRow(t));
-    setBars();
+    const node = document.getElementById("tr-" + id);
+    if (!t || !node) return;
+    const fresh = bubble(t);
+    fresh.style.animation = "none";
+    node.replaceWith(fresh);
+    setBar(t);
   }
 
   // ---------- загрузка частями (общий загрузчик из uploader.js)
@@ -145,24 +127,12 @@ window.PDTransfers = (() => {
     });
     active.set(t.id, job);
     return job.run().then((result) => {
-      if (result === "done") {
-        active.delete(t.id);
-        toast(`«${t.name}» доставлен на «${t.to_label}»`);
-        refresh();
-      } else if (result === "gone") {
-        active.delete(t.id);
-        refresh();
-      }
+      if (result === "done" || result === "gone") { active.delete(t.id); refresh(); }
     }).catch((e) => {
       active.delete(t.id);
       toast(`«${t.name}»: ${e.message}`, true);
       refresh();
     });
-  }
-
-  function pause(id) {
-    const job = active.get(id);
-    if (job) job.pause();
   }
 
   async function resume(t) {
@@ -177,28 +147,22 @@ window.PDTransfers = (() => {
   }
 
   async function remove(t) {
-    const what = t.direction === "in" ? "Удалить файл с сервера?" : "Отменить передачу и удалить файл с сервера?";
-    if (!confirm(what)) return;
+    if (!confirm(t.direction === "in" ? "Удалить файл с сервера?" : "Отменить передачу и удалить файл с сервера?")) return;
     const job = active.get(t.id);
     if (job) { job.pause(); active.delete(t.id); }
-    try {
-      await api(ROLE, `/api/transfers/${t.id}`, { method: "DELETE" });
-    } catch (e) {
-      toast(e.message, true);
-    }
+    try { await api(ROLE, `/api/transfers/${t.id}`, { method: "DELETE" }); } catch (e) { toast(e.message, true); }
     refresh();
   }
 
-  async function send() {
-    const files = picked.slice();
-    picked = [];
-    renderPicked();
-    for (const file of files) {
+  async function send(files) {
+    const to = peer;
+    for (const file of [...files]) {
+      if (!file.size) { toast(`«${file.name}» пустой — пропускаю`, true); continue; }
       let t;
       try {
         t = await api(ROLE, "/api/transfers", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: file.name, size: file.size, mime: file.type, to: target }),
+          body: JSON.stringify({ name: file.name, size: file.size, mime: file.type, to }),
         });
       } catch (e) {
         toast(`«${file.name}»: ${e.message}`, true);
@@ -206,32 +170,39 @@ window.PDTransfers = (() => {
       }
       info.outgoing.unshift(t);
       render();
+      $("pcItems").scrollTop = $("pcItems").scrollHeight;
       await upload(t, file);  // по одному файлу — так быстрее доходит хотя бы первый
     }
   }
 
-  function addFiles(list) {
-    picked.push(...[...list].filter((f) => f.size > 0));
-    renderPicked();
-  }
-
   // ---------- кнопки и перетаскивание
-  $("trPick").addEventListener("click", () => $("trInput").click());
-  $("trInput").addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
-  $("trSend").addEventListener("click", send);
-  const zone = $("trDrop");
-  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
-  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
-  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); addFiles(e.dataTransfer.files); });
+  $("pcAttach").addEventListener("click", () => $("pcFileInput").click());
+  $("pcFileInput").addEventListener("change", (e) => { send(e.target.files); e.target.value = ""; });
+  const zone = $("pcMain");
+  let depth = 0;
+  zone.addEventListener("dragenter", (e) => { e.preventDefault(); depth++; $("pcDrop").hidden = false; });
+  zone.addEventListener("dragover", (e) => e.preventDefault());
+  zone.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; $("pcDrop").hidden = true; } });
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    depth = 0;
+    $("pcDrop").hidden = true;
+    if (e.dataTransfer.files.length) send(e.dataTransfer.files);
+  });
   // Не даём случайно закрыть вкладку посреди загрузки.
   window.addEventListener("beforeunload", (e) => {
     if ([...active.values()].some((j) => j.state !== "paused")) { e.preventDefault(); e.returnValue = ""; }
   });
-  setInterval(() => { if (info && !$("transfersMain").hidden && !active.size) render(); }, 60000); // «удалится через…»
+  setInterval(() => { if (peer && !active.size) render(); }, 60000);  // «удалится через…»
 
   return {
     refresh,
-    busy: () => [...active.values()].some((j) => j.state !== "paused"),
-    onIncoming: (fn) => { onNew = fn; },
+    devices: () => devices,
+    unread: (id) => unread.has(id),
+    show(id) { peer = id; unread.delete(id); render(); changed(); },
+    hide() { peer = null; },
+    current: () => peer,
+    onChange(fn) { listeners.push(fn); },
+    onIncoming(fn) { onNew = fn; },
   };
 })();

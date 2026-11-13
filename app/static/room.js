@@ -31,7 +31,7 @@
 
   function backUrl() {
     if (!room || room.me === "guest") return "/get";
-    return mobile ? "/chat?tab=people" : "/";
+    return mobile ? "/chat" : "/";
   }
 
   // ---------- чат: отправка через «чат с человеком»

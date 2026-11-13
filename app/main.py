@@ -40,7 +40,7 @@ import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
-    FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse,
+    FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response,
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -205,41 +205,6 @@ CREATE TABLE IF NOT EXISTS transfers (
     done       REAL
 );
 CREATE INDEX IF NOT EXISTS transfers_by_account ON transfers(account_id);
-CREATE TABLE IF NOT EXISTS shares (
-    id          TEXT PRIMARY KEY,
-    account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    owner       TEXT NOT NULL,
-    owner_label TEXT NOT NULL,
-    token_hash  TEXT UNIQUE NOT NULL,
-    code_hash   TEXT UNIQUE NOT NULL,
-    pw_salt     TEXT,
-    pw_hash     TEXT,
-    once        INTEGER NOT NULL DEFAULT 0,
-    notify      INTEGER NOT NULL DEFAULT 1,
-    created     REAL NOT NULL,
-    expires     REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS share_files (
-    id        TEXT PRIMARY KEY,
-    share_id  TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
-    name      TEXT NOT NULL,
-    size      INTEGER NOT NULL,
-    mime      TEXT,
-    received  INTEGER NOT NULL DEFAULT 0,
-    done      REAL,
-    downloads INTEGER NOT NULL DEFAULT 0,
-    created   REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS share_access (
-    key_hash TEXT PRIMARY KEY,
-    share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
-    expires  REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS share_sessions (
-    key_hash TEXT PRIMARY KEY,
-    share_id TEXT NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
-    expires  REAL NOT NULL
-);
 -- Чаты с людьми: владелец (аккаунт) + один собеседник без регистрации.
 CREATE TABLE IF NOT EXISTS rooms (
     id             TEXT PRIMARY KEY,
@@ -398,8 +363,11 @@ class Store:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
         add("accounts", "google_sub", "google_sub TEXT")
         add("accounts", "email", "email TEXT")
-        add("shares", "kind", "kind TEXT NOT NULL DEFAULT 'send'")
-        add("shares", "max_bytes", "max_bytes INTEGER NOT NULL DEFAULT 0")
+        # v1.8: «Посылки» и «Попросить файлы» заменены чатами с людьми — убираем их таблицы и файлы.
+        for table in ("share_sessions", "share_access", "share_files", "shares"):
+            self.db.execute(f"DROP TABLE IF EXISTS {table}")
+        for f in self.transfers_root.glob("s-*"):
+            f.unlink(missing_ok=True)
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS accounts_by_google ON accounts(google_sub) "
                         "WHERE google_sub IS NOT NULL")
 
@@ -548,7 +516,7 @@ class Store:
             if total > MAX_DEVICES:
                 raise HTTPException(409, f"Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные")
             old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
-            for table in ("devices", "transfers", "shares", "rooms"):
+            for table in ("devices", "transfers", "rooms"):
                 self.run(f"UPDATE {table} SET account_id=? WHERE account_id=?", current["id"], target["id"])
             self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{target['id']}")
             self.delete_owner_tools(f"acc:{target['id']}")
@@ -573,7 +541,6 @@ class Store:
         if merge:
             self.run("UPDATE devices SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE transfers SET account_id=? WHERE account_id=?", target["id"], current["id"])
-            self.run("UPDATE shares SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE rooms SET account_id=? WHERE account_id=?", target["id"], current["id"])
             self.run("UPDATE push_subs SET owner=? WHERE owner=?", f"acc:{target['id']}", f"acc:{current['id']}")
             self.delete_owner_tools(f"acc:{current['id']}")
@@ -659,45 +626,23 @@ class Store:
             "expires": row["created"] + self.settings.transfer_ttl_hours * 3600,
             "from_label": row["from_label"], "to_label": target["label"] if target else "?",
             "direction": "in" if row["to_dev"] == me else "out",
+            "peer": row["from_dev"] if row["to_dev"] == me else row["to_dev"],  # второй компьютер (для чата с ним)
         }
         if row["done"]:
             data["url"] = f"/x/{row['id']}"
         return data
 
-    # ---------- посылки (по ссылке и коду)
-    def share_path(self, fid: str) -> Path:
-        return self.transfers_root / f"s-{fid}"
-
-    def delete_share(self, sid: str) -> None:
-        for f in self.q("SELECT id FROM share_files WHERE share_id=?", sid):
-            self.share_path(f["id"]).unlink(missing_ok=True)
-            self.transfer_locks.pop(f["id"], None)
-        self.run("DELETE FROM shares WHERE id=?", sid)  # файлы и сессии удалятся каскадом
-
-    def delete_share_file(self, fid: str) -> None:
-        self.share_path(fid).unlink(missing_ok=True)
-        self.run("DELETE FROM share_files WHERE id=?", fid)
-        self.transfer_locks.pop(fid, None)
-
-    def share_files(self, sid: str) -> list[dict]:
-        return [{"id": f["id"], "name": f["name"], "size": f["size"], "mime": f["mime"], "received": f["received"],
-                 "done": bool(f["done"]), "downloads": f["downloads"]}
-                for f in self.q("SELECT * FROM share_files WHERE share_id=? ORDER BY created", sid)]
-
     def account_used_bytes(self, account_id: str) -> int:
         a = self.one("SELECT COALESCE(SUM(size), 0) AS n FROM transfers WHERE account_id=?", account_id)["n"]
-        b = self.one("SELECT COALESCE(SUM(f.size), 0) AS n FROM share_files f JOIN shares s ON s.id=f.share_id "
-                     "WHERE s.account_id=?", account_id)["n"]
         c = self.one("SELECT COALESCE(SUM(m.size), 0) AS n FROM room_messages m JOIN rooms r ON r.id=m.room_id "
                      "WHERE r.account_id=? AND m.kind!='text' AND m.expired=0", account_id)["n"]
-        return a + b + c
+        return a + c
 
     def reserved_bytes(self) -> int:
         """Сколько ещё должно «доехать» во все незаконченные загрузки — это место уже занято."""
         a = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM transfers WHERE done IS NULL")["n"]
-        b = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM share_files WHERE done IS NULL")["n"]
         c = self.one("SELECT COALESCE(SUM(size-received), 0) AS n FROM room_messages WHERE done IS NULL")["n"]
-        return a + b + c
+        return a + c
 
     # ---------- чаты с людьми
     def room_path(self, mid: str) -> Path:
@@ -927,11 +872,6 @@ class Store:
         # 7а) Передачи между компьютерами: живут сутки (и недокачанные тоже).
         for row in self.q("SELECT id FROM transfers WHERE created<?", now - s.transfer_ttl_hours * 3600):
             self.delete_transfer(row["id"])
-        # 7б) Посылки по ссылке/коду: срок вышел — удаляем.
-        for row in self.q("SELECT id FROM shares WHERE expires<?", now):
-            self.delete_share(row["id"])
-        self.run("DELETE FROM share_sessions WHERE expires<?", now)
-        self.run("DELETE FROM share_access WHERE expires<?", now)
         # 8) Чаты с людьми: файлы живут сутки (недокачанные — тоже), текст остаётся.
         #    Чат, в котором 30 дней ничего не происходило, закрывается сам.
         ttl = now - s.transfer_ttl_hours * 3600
@@ -1088,9 +1028,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         host = request.headers.get("host", "")
         csp = CSP + (f" wss://{host} ws://{host}" if HOST_RE.fullmatch(host) else "")
         path = request.url.path
-        is_guest_file = path.startswith("/g/") and path.count("/") >= 3  # /g/<ключ>/<файл>
-        owner_file = path.startswith("/api/shares/") and path.endswith("/download")
-        if not path.startswith(("/f/", "/t/", "/s/", "/x/", "/r/")) and not is_guest_file and not owner_file:  # для файлов политику ставят сами обработчики
+        if not path.startswith(("/f/", "/t/", "/s/", "/x/", "/r/")):  # для файлов политику ставят сами обработчики
             h.setdefault("Content-Security-Policy", csp)
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
@@ -1977,153 +1915,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(store.transfer_path(tid), media_type="application/octet-stream", filename=row["name"],
                             content_disposition_type="attachment", headers={"Content-Security-Policy": "sandbox"})
 
-    # ------------------------------------------------- посылки «другому человеку»
-    # Ссылка и 9-значный код. Получатель открывает ссылку или вводит код на /get —
-    # без регистрации. На сервере хранятся только «отпечатки» ссылки, кода и пароля.
-    SHARE_HOURS = (1, 6, 24)
-    GUEST_COOKIE = "pd_guest"
-
     def account_of(role: str, who: sqlite3.Row) -> str:
         return who["account_id"] if role == "pc" else who["id"]
 
-    def new_share_secrets() -> tuple[str, str]:
-        token = secrets.token_urlsafe(24)
-        while True:  # 9 цифр; совпадение с действующим кодом почти невозможно, но проверяем
+    def new_invite_code() -> str:
+        """9 цифр для приглашения в чат. Совпадение с действующим кодом почти невозможно, но проверяем."""
+        while True:
             code = f"{secrets.randbelow(10**9):09d}"
-            h = store.keyed_hash(code)
-            if not store.one("SELECT 1 FROM shares WHERE code_hash=?", h) and \
-                    not store.one("SELECT 1 FROM rooms WHERE invite_code=?", h):
-                return token, code
-
-    def share_links(request: Request, token: str, code: str) -> dict:
-        return {"link": f"{base_url(request)}/g/{token}", "code": f"{code[:3]} {code[3:6]} {code[6:]}",
-                "get_url": f"{base_url(request)}/get"}
-
-    def hash_password(password: str, salt: bytes) -> str:
-        return hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32).hex()
-
-    def owner_share(sid: str, request: Request) -> tuple[sqlite3.Row, str, str]:
-        role, owner, who = tool_owner(request)
-        row = store.one("SELECT * FROM shares WHERE id=? AND account_id=?", sid, account_of(role, who))
-        if not row:
-            raise HTTPException(404, "Посылка не найдена — возможно, срок вышел")
-        return row, role, owner
-
-    def share_owner_public(row: sqlite3.Row) -> dict:
-        return {"id": row["id"], "owner_label": row["owner_label"], "created": row["created"],
-                "expires": row["expires"], "once": bool(row["once"]), "notify": bool(row["notify"]),
-                "has_password": bool(row["pw_hash"]), "files": store.share_files(row["id"]),
-                "kind": row["kind"], "max_bytes": row["max_bytes"]}
-
-    async def shares_changed(row: sqlite3.Row) -> None:
-        kind, _, key = row["owner"].partition(":")
-        sockets = store.pc_sockets.get(key, set()) if kind == "dev" else store.phone_sockets.get(key, set())
-        await store.send_ws(sockets, {"type": "shares_changed"})
-
-    @app.get("/api/shares")
-    async def list_shares(request: Request):
-        role, _, who = tool_owner(request)
-        rows = store.q("SELECT * FROM shares WHERE account_id=? ORDER BY created DESC", account_of(role, who))
-        return {"shares": [share_owner_public(r) for r in rows], "hours": SHARE_HOURS,
-                "max_mb": settings.transfer_max_mb, "chunk_mb": settings.transfer_chunk_mb,
-                "quota_mb": settings.transfer_quota_mb, "used": store.account_used_bytes(account_of(role, who))}
-
-    @app.post("/api/shares")
-    async def create_share(request: Request):
-        role, owner, who = tool_owner(request)
-        limiter.hit(f"share:{owner}", 30, 600)
-        body = await request.json()
-        if not isinstance(body, dict):
-            raise HTTPException(400, "Неверный запрос")
-        hours = body.get("hours") if body.get("hours") in SHARE_HOURS else 24
-        password = body.get("password") if isinstance(body.get("password"), str) else ""
-        password = password.strip()
-        if password and not (4 <= len(password) <= 64):
-            raise HTTPException(400, "Пароль — от 4 до 64 символов")
-        salt = secrets.token_bytes(16) if password else None
-        # Как отправитель подпишется для получателя («Файлы от Роман»). По умолчанию — имя компьютера.
-        raw_name = body.get("name") if isinstance(body.get("name"), str) else ""
-        sender = re.sub(r"[\x00-\x1f\x7f]", "", raw_name).strip()[:40] or (who["label"] if role == "pc" else "PhoneDrop")
-        token, code = new_share_secrets()
-        sid = uuid.uuid4().hex
-        now = time.time()
-        # kind="request" — «Попросить файлы»: по коду люди ЗАГРУЖАЮТ файлы тебе (до max_mb), скачать ничего не могут.
-        kind = "request" if body.get("kind") == "request" else "send"
-        max_mb = body.get("max_mb") if isinstance(body.get("max_mb"), int) else settings.transfer_max_mb
-        max_bytes = min(max(max_mb, 1), settings.transfer_max_mb) * MB if kind == "request" else 0
-        if kind == "request":
-            password, salt = "", None
-        store.run("INSERT INTO shares (id, account_id, owner, owner_label, token_hash, code_hash, pw_salt, pw_hash, "
-                  "once, notify, created, expires, kind, max_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  sid, account_of(role, who), owner, sender,
-                  store.keyed_hash(token), store.keyed_hash(code), salt.hex() if salt else None,
-                  hash_password(password, salt) if password else None,
-                  int(bool(body.get("once"))) if kind == "send" else 0, int(body.get("notify", True) is not False),
-                  now, now + hours * 3600, kind, max_bytes)
-        row = store.one("SELECT * FROM shares WHERE id=?", sid)
-        return {"share": share_owner_public(row), **share_links(request, token, code)}
-
-    @app.post("/api/shares/{sid}/rotate")
-    async def rotate_share(sid: str, request: Request):
-        """Новая ссылка и код (старые перестают работать). Нужна, если ссылку потеряли или она утекла."""
-        row, _, _ = owner_share(sid, request)
-        token, code = new_share_secrets()
-        store.run("UPDATE shares SET token_hash=?, code_hash=? WHERE id=?", store.keyed_hash(token), store.keyed_hash(code), sid)
-        store.run("DELETE FROM share_sessions WHERE share_id=?", sid)
-        store.run("DELETE FROM share_access WHERE share_id=?", sid)  # старые ссылки «по коду» тоже гаснут
-        return {"share": share_owner_public(store.one("SELECT * FROM shares WHERE id=?", sid)),
-                **share_links(request, token, code)}
-
-    @app.delete("/api/shares/{sid}")
-    async def delete_share(sid: str, request: Request):
-        owner_share(sid, request)
-        store.delete_share(sid)
-        return {"ok": True}
-
-    @app.post("/api/shares/{sid}/files")
-    async def add_share_file(sid: str, request: Request):
-        row, _, _ = owner_share(sid, request)
-        body = await request.json()
-        if not isinstance(body, dict):
-            raise HTTPException(400, "Неверный запрос")
-        size = body.get("size")
-        if not isinstance(size, int) or size <= 0:
-            raise HTTPException(400, "Пустой файл отправлять незачем")
-        if store.one("SELECT COUNT(*) AS n FROM share_files WHERE share_id=?", sid)["n"] >= 200:
-            raise HTTPException(400, "В одной посылке — не больше 200 файлов")
-        check_space(row["account_id"], size)
-        name = safe_filename(body.get("name") if isinstance(body.get("name"), str) else "")
-        mime = body.get("mime") if isinstance(body.get("mime"), str) else ""
-        fid = uuid.uuid4().hex
-        store.run("INSERT INTO share_files (id, share_id, name, size, mime, created) VALUES (?,?,?,?,?,?)",
-                  fid, sid, name, size, normalize_mime(mime) or mimetypes.guess_type(name)[0] or "application/octet-stream",
-                  time.time())
-        store.share_path(fid).touch()
-        return {"id": fid, "name": name, "size": size, "received": 0, "done": False, "downloads": 0}
-
-    @app.put("/api/shares/{sid}/files/{fid}/data")
-    async def upload_share_chunk(sid: str, fid: str, request: Request, offset: int = -1):
-        owner_share(sid, request)
-        async with store.transfer_locks[fid]:
-            f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=?", fid, sid)
-            if not f:
-                raise HTTPException(404, "Файл не найден")
-            if f["done"]:
-                return {"received": f["received"], "done": True}
-            if offset != f["received"]:
-                return JSONResponse({"detail": "Не то место в файле", "received": f["received"]}, status_code=409)
-            received = await write_chunk(store.share_path(fid), f["size"], offset, request)
-            done = time.time() if received == f["size"] else None
-            store.run("UPDATE share_files SET received=?, done=? WHERE id=?", received, done, fid)
-        return {"received": received, "done": bool(done)}
-
-    @app.delete("/api/shares/{sid}/files/{fid}")
-    async def delete_share_file(sid: str, fid: str, request: Request):
-        owner_share(sid, request)
-        if not store.one("SELECT 1 FROM share_files WHERE id=? AND share_id=?", fid, sid):
-            raise HTTPException(404, "Файл не найден")
-        store.delete_share_file(fid)
-        return {"ok": True}
+            if not store.one("SELECT 1 FROM rooms WHERE invite_code=?", store.keyed_hash(code)):
+                return code
 
     # ------------------------------------------------------- чаты с людьми
     # Владелец (аккаунт) создаёт чат и получает одноразовый код/ссылку на сутки.
@@ -2187,7 +1987,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "online": store.room_online(room["id"], "owner"), "last_activity": room["last_activity"]}
 
     def new_invite(rid: str, request: Request) -> dict:
-        _, code = new_share_secrets()  # 9 цифр, не совпадает ни с одной посылкой и приглашением
+        code = new_invite_code()
         token = secrets.token_urlsafe(24)
         expires = time.time() + ROOM_INVITE_HOURS * 3600
         store.run("UPDATE rooms SET invite_code=?, invite_token=?, invite_expires=? WHERE id=?",
@@ -2566,31 +2366,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def guest_code_page():
         return FileResponse(STATIC_DIR / "guest.html")
 
-    @app.get("/g/{token}", include_in_schema=False)
-    async def guest_share_page(token: str):
-        return FileResponse(STATIC_DIR / "guest.html")
-
-    def share_by_ref(ref: str) -> sqlite3.Row:
-        """ref — ключ из ссылки /g/<ключ>. Ссылка, открытая по коду, выглядит как /g/c.<ключ>."""
-        row = None
-        if ref.startswith("c."):
-            acc = store.one("SELECT share_id FROM share_access WHERE key_hash=? AND expires>?", token_hash(ref[2:]), time.time())
-            row = store.one("SELECT * FROM shares WHERE id=?", acc["share_id"]) if acc else None
-        elif ref:
-            row = store.one("SELECT * FROM shares WHERE token_hash=?", store.keyed_hash(ref))
-        if not row or row["expires"] < time.time():
-            raise HTTPException(404, "Посылка не найдена: ссылка или код неверные, или срок хранения закончился")
-        return row
-
-    def guest_allowed(row: sqlite3.Row, request: Request) -> bool:
-        if not row["pw_hash"]:
-            return True
-        key = request.cookies.get(GUEST_COOKIE)
-        return bool(key and store.one("SELECT 1 FROM share_sessions WHERE key_hash=? AND share_id=? AND expires>?",
-                                      token_hash(key), row["id"], time.time()))
-
     @app.post("/api/get/code")
     async def guest_by_code(request: Request):
+        """Собеседник вводит код приглашения на /get — и попадает в чат."""
         check_origin(request.headers)
         # Защита от подбора: 10 попыток за 10 минут с одного адреса и общий «предохранитель» на всех.
         limiter.hit(f"code:{client_ip(request)}", 10, 600)
@@ -2598,193 +2376,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = await request.json()
         raw = body.get("code") if isinstance(body, dict) and isinstance(body.get("code"), str) else ""
         code = re.sub(r"\D", "", raw)
-        row = store.one("SELECT * FROM shares WHERE code_hash=?", store.keyed_hash(code)) if len(code) == 9 else None
-        if not row and len(code) == 9:  # может быть, это приглашение в чат
-            room = store.one("SELECT * FROM rooms WHERE invite_code=?", store.keyed_hash(code))
-            if room and room["invite_expires"] > time.time():
-                return await join_room(room, request)
-        if not row or row["expires"] < time.time():
-            raise HTTPException(404, "Код не подходит или срок посылки закончился. Проверь цифры")
-        # Код подошёл — выдаём личную ссылку получателя (живёт, пока жива посылка).
-        key = secrets.token_urlsafe(24)
-        store.run("INSERT INTO share_access (key_hash, share_id, expires) VALUES (?,?,?)",
-                  token_hash(key), row["id"], row["expires"])
-        return {"ref": f"c.{key}"}
-
-    @app.post("/api/g/{ref}/unlock")
-    async def guest_unlock(ref: str, request: Request):
-        check_origin(request.headers)
-        row = share_by_ref(ref)
-        limiter.hit(f"pw:{client_ip(request)}:{row['id']}", 5, 900)  # 5 попыток пароля за 15 минут
-        body = await request.json()
-        password = body.get("password") if isinstance(body, dict) and isinstance(body.get("password"), str) else ""
-        if not row["pw_hash"]:
-            return {"ok": True}
-        if not hmac.compare_digest(hash_password(password.strip(), bytes.fromhex(row["pw_salt"])), row["pw_hash"]):
-            raise HTTPException(403, "Неверный пароль")
-        key = secrets.token_urlsafe(32)
-        store.run("INSERT INTO share_sessions (key_hash, share_id, expires) VALUES (?,?,?)",
-                  token_hash(key), row["id"], row["expires"])
-        response = JSONResponse({"ok": True})
-        response.set_cookie(GUEST_COOKIE, key, max_age=max(60, int(row["expires"] - time.time())),
-                            httponly=True, samesite="lax", secure=is_https(request), path="/")
-        return response
-
-    @app.get("/api/g/{ref}")
-    async def guest_share(ref: str, request: Request):
-        row = share_by_ref(ref)
-        if row["kind"] == "request":
-            # Отправителю не показываем, что уже лежит в «ящике», — только сколько места осталось.
-            used = store.one("SELECT COALESCE(SUM(size), 0) AS n FROM share_files WHERE share_id=?", row["id"])["n"]
-            return {"kind": "request", "owner_label": row["owner_label"], "expires": row["expires"],
-                    "max_bytes": row["max_bytes"], "left_bytes": max(0, row["max_bytes"] - used),
-                    "chunk_mb": settings.transfer_chunk_mb}
-        if not guest_allowed(row, request):
-            return JSONResponse({"password": True, "owner_label": row["owner_label"]}, status_code=401)
-        files = store.share_files(row["id"])
-        return {"owner_label": row["owner_label"], "expires": row["expires"], "once": bool(row["once"]),
-                "files": [{"id": f["id"], "name": f["name"], "size": f["size"], "url": f"/g/{ref}/{f['id']}"}
-                          for f in files if f["done"]],
-                "uploading": [{"name": f["name"], "size": f["size"], "received": f["received"]}
-                              for f in files if not f["done"]]}
-
-    # ---------- «Попросить файлы»: гость загружает файлы владельцу
-
-    def request_share(ref: str, request: Request) -> sqlite3.Row:
-        check_origin(request.headers)
-        row = share_by_ref(ref)
-        if row["kind"] != "request":
-            raise HTTPException(403, "По этой ссылке можно только скачивать")
-        return row
-
-    @app.post("/api/g/{ref}/files")
-    async def guest_add_file(ref: str, request: Request):
-        row = request_share(ref, request)
-        limiter.hit(f"guest-up:{client_ip(request)}", 100, 600)
-        body = await request.json()
-        size = body.get("size") if isinstance(body, dict) else None
-        if not isinstance(size, int) or size <= 0:
-            raise HTTPException(400, "Пустой файл отправлять незачем")
-        used = store.one("SELECT COALESCE(SUM(size), 0) AS n FROM share_files WHERE share_id=?", row["id"])["n"]
-        if used + size > row["max_bytes"]:
-            raise HTTPException(413, f"Не помещается: осталось {round(max(0, row['max_bytes'] - used) / MB)} МБ из "
-                                     f"{round(row['max_bytes'] / MB)} МБ, которые разрешил получатель")
-        if store.one("SELECT COUNT(*) AS n FROM share_files WHERE share_id=?", row["id"])["n"] >= 200:
-            raise HTTPException(400, "Слишком много файлов — не больше 200")
-        check_space(row["account_id"], size)
-        name = safe_filename(body.get("name") if isinstance(body.get("name"), str) else "")
-        fid = uuid.uuid4().hex
-        store.run("INSERT INTO share_files (id, share_id, name, size, mime, created) VALUES (?,?,?,?,?,?)",
-                  fid, row["id"], name, size, mimetypes.guess_type(name)[0] or "application/octet-stream", time.time())
-        store.share_path(fid).touch()
-        return {"id": fid, "received": 0, "size": size}
-
-    @app.get("/api/g/{ref}/files/{fid}")
-    async def guest_file_status(ref: str, fid: str, request: Request):
-        row = request_share(ref, request)
-        f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=?", fid, row["id"])
-        if not f:
-            raise HTTPException(404, "Файл не найден")
-        return {"received": f["received"], "done": bool(f["done"])}
-
-    @app.put("/api/g/{ref}/files/{fid}/data")
-    async def guest_upload_chunk(ref: str, fid: str, request: Request, offset: int = -1):
-        row = request_share(ref, request)
-        async with store.transfer_locks[fid]:
-            f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=?", fid, row["id"])
-            if not f:
-                raise HTTPException(404, "Файл не найден")
-            if f["done"]:
-                return {"received": f["received"], "done": True}
-            if offset != f["received"]:
-                return JSONResponse({"detail": "Не то место в файле", "received": f["received"]}, status_code=409)
-            received = await write_chunk(store.share_path(fid), f["size"], offset, request)
-            done = time.time() if received == f["size"] else None
-            store.run("UPDATE share_files SET received=?, done=? WHERE id=?", received, done, fid)
-        if done:
-            if row["notify"]:
-                store.push(row["owner"], {"title": "📥 Тебе прислали файл", "body": f"{f['name']} · {round(f['size'] / MB, 1)} МБ",
-                                          "url": "/" if row["owner"].startswith("dev:") else "/chat", "tag": f"req-{fid}"})
-            await shares_changed(row)
-        return {"received": received, "done": bool(done)}
-
-    @app.get("/api/shares/{sid}/files/{fid}/download")
-    async def owner_download(sid: str, fid: str, request: Request):
-        """Владелец скачивает то, что ему прислали (или то, что сам выложил). С докачкой."""
-        owners = owner_from_cookies(request)
-        accounts = set()
-        for o in owners:
-            kind, _, key = o.partition(":")
-            row = store.device(key) if kind == "dev" else store.one("SELECT * FROM accounts WHERE id=?", key)
-            if row:
-                accounts.add(row["account_id"] if kind == "dev" else row["id"])
-        share = store.one("SELECT * FROM shares WHERE id=?", sid)
-        f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=? AND done IS NOT NULL", fid, sid)
-        if not share or share["account_id"] not in accounts or not f:
-            raise HTTPException(404, "Файл не найден — возможно, срок вышел")
-        return FileResponse(store.share_path(fid), media_type="application/octet-stream", filename=f["name"],
-                            content_disposition_type="attachment", headers={"Content-Security-Policy": "sandbox"})
-
-    @app.get("/g/{ref}/{fid}")
-    async def guest_download(ref: str, fid: str, request: Request):
-        row = share_by_ref(ref)
-        if row["kind"] == "request":
-            raise HTTPException(404, "Файл не найден")  # из «ящика» гость ничего скачать не может
-        if not guest_allowed(row, request):
-            raise HTTPException(403, "Сначала введи пароль")
-        f = store.one("SELECT * FROM share_files WHERE id=? AND share_id=? AND done IS NOT NULL", fid, row["id"])
-        if not f:
-            raise HTTPException(404, "Файл не найден — возможно, его уже скачали и он удалён")
-        path = store.share_path(fid)
-        size = path.stat().st_size
-        start, end, status = 0, size - 1, 200
-        headers = {
-            "Content-Disposition": f"attachment; filename*=utf-8''{quote(f['name'])}",
-            "Content-Security-Policy": "sandbox",
-        }
-        # «Удалить после скачивания» — без докачки: файл исчезает сразу после полной загрузки.
-        if not row["once"]:
-            headers["Accept-Ranges"] = "bytes"
-            rng = request.headers.get("range")
-            if rng:
-                m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
-                if not m or (not m.group(1) and not m.group(2)):
-                    return PlainTextResponse("Неверный Range", 416, headers={"Content-Range": f"bytes */{size}"})
-                if m.group(1):
-                    start = int(m.group(1))
-                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
-                else:
-                    start = max(0, size - int(m.group(2)))
-                if start > end or start >= size:
-                    return PlainTextResponse("Неверный Range", 416, headers={"Content-Range": f"bytes */{size}"})
-                status = 206
-                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-        headers["Content-Length"] = str(end - start + 1)
-        sid, owner, name, once, notify = row["id"], row["owner"], f["name"], row["once"], row["notify"]
-
-        async def body():
-            remaining = end - start + 1
-            with path.open("rb") as fh:
-                fh.seek(start)
-                while remaining > 0:
-                    piece = await run_in_threadpool(fh.read, min(MB, remaining))
-                    if not piece:
-                        break
-                    remaining -= len(piece)
-                    yield piece
-            if end == size - 1 and remaining == 0:  # дошли до конца файла — считаем «скачали»
-                store.run("UPDATE share_files SET downloads=downloads+1 WHERE id=?", fid)
-                if notify:
-                    store.push(owner, {"title": "📥 Файл скачали", "body": f"{name} — по твоей ссылке",
-                                       "url": "/" if owner.startswith("dev:") else "/chat", "tag": f"share-{fid}"})
-                if once:
-                    store.delete_share_file(fid)
-                    if not store.one("SELECT 1 FROM share_files WHERE share_id=?", sid):
-                        store.delete_share(sid)
-                current = store.one("SELECT * FROM shares WHERE id=?", sid)
-                await shares_changed(current or row)
-
-        return StreamingResponse(body(), status_code=status, media_type="application/octet-stream", headers=headers)
+        room = store.one("SELECT * FROM rooms WHERE invite_code=?", store.keyed_hash(code)) if len(code) == 9 else None
+        if not room or room["invite_expires"] < time.time():
+            raise HTTPException(404, "Код не подходит: проверь цифры. Код одноразовый и действует сутки")
+        return await join_room(room, request)
 
     @app.get("/f/{mid}")
     async def get_file(mid: str, request: Request, dl: int = 0):

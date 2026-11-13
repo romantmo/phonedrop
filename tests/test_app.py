@@ -999,6 +999,10 @@ def test_transfer_between_computers_with_resume(client, two_pcs, settings):
         assert ws.receive_json()["type"] == "transfers_changed"
     incoming = office.get("/api/transfers").json()["incoming"]
     assert [x["name"] for x in incoming] == ["backup.zip"]
+    # чат «офис ↔ дом»: у каждой передачи указан второй компьютер
+    home_id = home.get("/api/state").json()["chat_id"]
+    assert incoming[0]["peer"] == home_id
+    assert home.get("/api/transfers").json()["outgoing"][0]["peer"] == office_id
     full = office.get(incoming[0]["url"])
     assert full.content == data and full.headers["content-disposition"].startswith("attachment")
     # докачка при скачивании (Range)
@@ -1051,132 +1055,13 @@ def test_transfer_manual_delete_and_receiver_removed(client, two_pcs, phone):
     assert not any(store(client).transfers_root.iterdir())
 
 
-# ------------------------------------------------ посылки «другому человеку»
-
-def upload_share_file(dev, sid, name, data):
-    f = dev.post(f"/api/shares/{sid}/files", json={"name": name, "size": len(data)}).json()
-    r = dev.request("PUT", f"/api/shares/{sid}/files/{f['id']}/data", params={"offset": 0}, content=data,
-                    headers={"Content-Type": "application/octet-stream"})
-    assert r.json()["done"] is True
-    return f
-
-
-def test_share_by_link_and_by_code(client, pc, phone):
-    pair(pc, phone)
-    r = phone.post("/api/shares", json={"hours": 24, "name": "Роман"})
-    assert r.status_code == 200, r.text
-    share = r.json()
-    link, code = share["link"], share["code"]
-    assert len(code.replace(" ", "")) == 9 and "/g/" in link
-    upload_share_file(phone, share["share"]["id"], "договор.pdf", b"%PDF-1.4 hello")
-    guest = Device(client, "guest")  # другой человек: никаких cookie, никакого QR
-    ref = link.rsplit("/g/", 1)[1]
-    info = guest.get(f"/api/g/{ref}").json()
-    assert info["owner_label"] == "Роман" and [f["name"] for f in info["files"]] == ["договор.pdf"]
-    got = guest.get(info["files"][0]["url"])
-    assert got.content == b"%PDF-1.4 hello" and got.headers["content-disposition"].startswith("attachment")
-    assert got.headers["content-security-policy"] == "sandbox"
-    # по коду, продиктованному по телефону
-    r = Device(client, "guest").post("/api/get/code", json={"code": code.replace(" ", "-")})
-    assert r.status_code == 200
-    by_code = guest.get(f"/api/g/{r.json()['ref']}").json()
-    assert by_code["files"][0]["name"] == "договор.pdf"
-    # отправитель видит, что скачали
-    assert phone.get("/api/shares").json()["shares"][0]["files"][0]["downloads"] == 1
-
-
-def test_share_password_once_and_notify(client, pc, phone):
-    pair(pc, phone)
-    sub = {"endpoint": "https://push.example/me", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
-    pc.post("/api/push/subscribe", json=sub)
-    share = pc.post("/api/shares", json={"hours": 1, "password": "кот2026", "once": True, "notify": True}).json()
-    upload_share_file(pc, share["share"]["id"], "photo.jpg", b"jpeg-bytes")
-    ref = share["link"].rsplit("/g/", 1)[1]
-    guest = Device(client, "guest")
-    locked = guest.get(f"/api/g/{ref}")
-    assert locked.status_code == 401 and locked.json()["password"] is True
-    assert guest.get(f"/g/{ref}/anything").status_code == 403
-    assert guest.post(f"/api/g/{ref}/unlock", json={"password": "неверный"}).status_code == 403
-    assert guest.post(f"/api/g/{ref}/unlock", json={"password": "кот2026"}).status_code == 200
-    files = guest.get(f"/api/g/{ref}").json()["files"]
-    assert guest.get(files[0]["url"]).content == b"jpeg-bytes"
-    # «удалить после скачивания»: файла и посылки больше нет
-    assert guest.get(files[0]["url"]).status_code == 404
-    assert pc.get("/api/shares").json()["shares"] == []
-    assert not any(store(client).transfers_root.iterdir())
-    client.portal.call(store(client).flush_push)
-    assert "photo.jpg" in dict(client.pusher.sent)["https://push.example/me"]
-
-
-def test_share_code_bruteforce_is_limited(client, pc, phone):
-    pair(pc, phone)
-    guest = Device(client, "guest")
-    for i in range(10):
-        assert guest.post("/api/get/code", json={"code": f"{i:09d}"}).status_code == 404
-    assert guest.post("/api/get/code", json={"code": "123456789"}).status_code == 429
-
-
-def test_share_password_bruteforce_is_limited(client, pc, phone):
-    pair(pc, phone)
-    share = pc.post("/api/shares", json={"password": "secret1"}).json()
-    ref = share["link"].rsplit("/g/", 1)[1]
-    guest = Device(client, "guest")
-    for _ in range(5):
-        assert guest.post(f"/api/g/{ref}/unlock", json={"password": "nope"}).status_code == 403
-    assert guest.post(f"/api/g/{ref}/unlock", json={"password": "secret1"}).status_code == 429
-
-
-def test_share_expires_and_rotate(client, pc, phone):
-    pair(pc, phone)
-    share = pc.post("/api/shares", json={"hours": 6}).json()
-    sid = share["share"]["id"]
-    upload_share_file(pc, sid, "a.txt", b"abc")
-    old_ref = share["link"].rsplit("/g/", 1)[1]
-    new = pc.post(f"/api/shares/{sid}/rotate").json()
-    guest = Device(client, "guest")
-    assert guest.get(f"/api/g/{old_ref}").status_code == 404  # старая ссылка погасла
-    assert guest.post("/api/get/code", json={"code": share["code"]}).status_code == 404
-    new_ref = new["link"].rsplit("/g/", 1)[1]
-    assert guest.get(f"/api/g/{new_ref}").status_code == 200
-    s = store(client)
-    s.run("UPDATE shares SET expires=?", time.time() - 1)
-    client.portal.call(s.cleanup)
-    assert guest.get(f"/api/g/{new_ref}").status_code == 404
-    assert not any(s.transfers_root.iterdir())
-
-
-def test_share_is_private_to_owner_account(client, pc, phone):
-    pair(pc, phone)
-    share = pc.post("/api/shares", json={}).json()
-    sid = share["share"]["id"]
-    stranger = Device(client, "phone")
-    pair(Device(client, "pc"), stranger)
-    assert stranger.post(f"/api/shares/{sid}/files", json={"name": "x", "size": 1}).status_code == 404
-    assert stranger.delete(f"/api/shares/{sid}").status_code == 404
-    assert phone.get("/api/shares").json()["shares"][0]["id"] == sid  # телефон видит посылки своего компьютера
-    assert Device(client, "guest").post("/api/shares", json={}).status_code == 400  # без X-PD-Role и входа — нельзя
-
-
-def test_share_download_range(client, pc, phone):
-    pair(pc, phone)
-    share = pc.post("/api/shares", json={}).json()
-    data = bytes(range(256)) * 100
-    upload_share_file(pc, share["share"]["id"], "big.bin", data)
-    ref = share["link"].rsplit("/g/", 1)[1]
-    guest = Device(client, "guest")
-    url = guest.get(f"/api/g/{ref}").json()["files"][0]["url"]
-    part = guest.get(url, headers={"Range": "bytes=100-199"})
-    assert part.status_code == 206 and part.content == data[100:200]
-    assert part.headers["content-range"] == f"bytes 100-199/{len(data)}"
-    assert guest.get(url, headers={"Range": "bytes=99999-"}).status_code == 416
-
-
 def test_guest_pages_are_public_and_safe(client):
-    for url in ("/get", "/g/whatever"):
+    for url in ("/get", "/j/whatever", "/room/" + "0" * 32):
         r = client.get(url)
         assert r.status_code == 200 and "<script>" not in r.text
         assert "script-src 'self'" in r.headers["content-security-policy"]
         assert r.headers["referrer-policy"] == "no-referrer"  # ключ из ссылки не утечёт на другие сайты
+    assert client.get("/g/whatever").status_code == 404  # «посылок» больше нет (v1.8)
 
 
 def test_phone_opening_main_page_goes_to_phone_app(client):
@@ -1237,8 +1122,8 @@ def test_new_phone_logs_in_with_google_without_computer(gclient):
     assert r.headers["location"] == "/chat?login=ok"
     data = phone.get("/api/phone/chats").json()
     assert data["chats"] == [] and data["account"] == {"email": "roman@example.com", "google": True}
-    # без компьютера уже можно отправлять посылки
-    assert phone.post("/api/shares", json={}).status_code == 200
+    # без компьютера уже можно создавать чаты с людьми
+    assert phone.post("/api/rooms", json={"title": "Саша"}).status_code == 200
 
 
 def test_google_login_restores_account_on_new_phone(gclient):
@@ -1304,49 +1189,6 @@ def test_phone_logout_only_with_google(gclient, settings):
     google_login(phone, "phone", "roman@example.com", "g-1")
     assert phone.post("/api/phone/logout").status_code == 200
     assert phone.get("/api/phone/chats").status_code == 401
-
-
-# ---------------------------------------------------- «Попросить файлы»
-
-def test_request_files_from_stranger_abroad(client, pc, phone):
-    pair(pc, phone)
-    sub = {"endpoint": "https://push.example/me", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
-    phone.post("/api/push/subscribe", json=sub)
-    req = phone.post("/api/shares", json={"kind": "request", "hours": 24, "max_mb": 1, "name": "Роман"}).json()
-    sid = req["share"]["id"]
-    assert req["share"]["kind"] == "request"
-    stranger = Device(client, "guest")
-    ref = stranger.post("/api/get/code", json={"code": req["code"]}).json()["ref"]
-    info = stranger.get(f"/api/g/{ref}").json()
-    assert info["kind"] == "request" and info["owner_label"] == "Роман" and "files" not in info
-    f = stranger.post(f"/api/g/{ref}/files", json={"name": "отчёт.pdf", "size": 5}).json()
-    r = stranger.request("PUT", f"/api/g/{ref}/files/{f['id']}/data", params={"offset": 0}, content=b"12345",
-                         headers={"Content-Type": "application/octet-stream"})
-    assert r.json()["done"] is True
-    # получатель видит и скачивает
-    files = phone.get("/api/shares").json()["shares"][0]["files"]
-    assert [x["name"] for x in files] == ["отчёт.pdf"]
-    got = phone.get(f"/api/shares/{sid}/files/{f['id']}/download")
-    assert got.content == b"12345" and got.headers["content-security-policy"] == "sandbox"
-    assert pc.get(f"/api/shares/{sid}/files/{f['id']}/download").content == b"12345"  # и с компьютера
-    client.portal.call(store(client).flush_push)
-    assert "отчёт.pdf" in dict(client.pusher.sent)["https://push.example/me"]
-    # гость не может скачать ни свой, ни чужие файлы из «ящика»
-    assert stranger.get(f"/g/{ref}/{f['id']}").status_code == 404
-    # лимит размера, заданный получателем
-    big = stranger.post(f"/api/g/{ref}/files", json={"name": "big.iso", "size": 2 * 1024 * 1024})
-    assert big.status_code == 413
-    # чужой аккаунт не скачает
-    other = Device(client, "phone")
-    pair(Device(client, "pc"), other)
-    assert other.get(f"/api/shares/{sid}/files/{f['id']}/download").status_code == 404
-
-
-def test_cannot_upload_into_normal_share(client, pc, phone):
-    pair(pc, phone)
-    share = pc.post("/api/shares", json={}).json()
-    ref = share["link"].rsplit("/g/", 1)[1]
-    assert Device(client, "guest").post(f"/api/g/{ref}/files", json={"name": "x", "size": 1}).status_code == 403
 
 
 def test_google_phone_relinks_old_computer_and_keeps_google(gclient, settings):
@@ -1604,3 +1446,31 @@ def test_guest_home_redirects_to_his_chats(client, pc, phone):
     assert guest.get("/chat").headers["location"] == "/get"
     assert guest.get(f"/room/{rid}").status_code == 200
     assert phone.get("/chat").status_code == 200     # у владельца — обычное приложение
+
+
+# ------------------------------------------------ v1.8: «Посылки» заменены чатами с людьми
+
+
+def test_old_share_tables_are_removed_on_start(settings):
+    """На сервере с базой от v1.7 таблицы и файлы «Посылок» удаляются при запуске."""
+    import sqlite3 as sq
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    db = sq.connect(settings.data_dir / "phonedrop.db")
+    db.execute("CREATE TABLE shares (id TEXT PRIMARY KEY)")
+    db.execute("CREATE TABLE share_files (id TEXT PRIMARY KEY, share_id TEXT REFERENCES shares(id))")
+    db.commit()
+    db.close()
+    (settings.data_dir / "transfers").mkdir(exist_ok=True)
+    leftover = settings.data_dir / "transfers" / "s-oldfile"
+    leftover.write_bytes(b"x")
+    with TestClient(create_app(settings), base_url=BASE) as c:
+        names = {r["name"] for r in c.app.state.store.q("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "shares" not in names and "share_files" not in names and "rooms" in names
+    assert not leftover.exists()
+
+
+def test_shares_api_is_gone(client, pc, phone):
+    pair(pc, phone)
+    assert phone.post("/api/shares", json={}).status_code in (404, 405)
+    assert client.get("/static/shares.js").status_code == 404
+    assert Device(client, "room").post("/api/get/code", json={"code": "123456789"}).status_code == 404

@@ -103,73 +103,50 @@
 .tool-view .tool-foot .progress { max-width: 760px; }
 @media (max-width: 1100px) { .tools-main .tools-grid { grid-template-columns: 1fr 1fr; } }
 
-/* ---------- «📦 Передачи» */
-.tabs { flex-wrap: wrap; }
-.tabs button { position: relative; min-width: 0; padding: 0 6px; font-size: 14px; }
-.tab-dot {
-  position: absolute; top: 4px; right: 8px; width: 9px; height: 9px; border-radius: 50%;
-  background: var(--danger); box-shadow: 0 0 0 2px var(--panel);
+/* две вкладки «Чаты | Инструменты»: значок слева, подпись справа */
+.tabs button {
+  position: relative; display: flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 46px; padding: 0 8px; border-radius: 14px; font-size: 15px;
 }
-.tr-body { flex: 1; overflow-y: auto; padding: 20px 22px 40px; display: flex; flex-direction: column; gap: 16px; }
-.tr-card {
-  max-width: 860px; padding: 18px; border-radius: 18px; background: var(--panel);
-  box-shadow: var(--shadow); border: 1px solid var(--line); animation: rise .3s ease both;
-}
-.tr-card h3 { margin: 0 0 12px; font-size: 18px; }
-.tr-card h4 { margin: 16px 0 8px; font-size: 15px; color: var(--muted); }
-.tr-drop {
-  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 26px;
-  border: 2px dashed var(--line); border-radius: 16px; color: var(--muted); font-size: 16px;
-  transition: border-color .2s, background .2s;
-}
-.tr-drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.tr-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-.tr-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 14px; background: var(--panel-2); }
-.tr-row.big { padding: 14px; }
-.tr-ico { font-size: 24px; }
-.tr-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.tr-info b { overflow-wrap: anywhere; }
-.tr-info small { color: var(--muted); font-size: 13px; }
-.tr-info .progress { margin: 6px 0 2px; height: 8px; }
-.tr-info .progress .tr-bar { height: 100%; width: 0; background: var(--grad); border-radius: 4px; transition: width .4s ease; }
-.tr-status { font-variant-numeric: tabular-nums; }
-.tr-actions { display: flex; gap: 8px; flex-shrink: 0; }
-.tr-actions .btn { min-height: 38px; padding: 0 14px; font-size: 14px; }
-.tr-x { border: 0; background: none; color: var(--danger); font-size: 18px; cursor: pointer; }
-.tr-targets { display: flex; flex-wrap: wrap; gap: 8px; }
-.tr-target {
-  display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; min-width: 200px;
-  padding: 10px 14px; border: 2px solid var(--line); border-radius: 14px; background: var(--panel-2);
-  text-align: left; cursor: pointer; transition: border-color .2s;
-}
-.tr-target small { grid-column: 2; color: var(--muted); font-size: 12px; }
-.tr-target span:nth-child(2) { font-weight: 700; }
-.tr-target.on { border-color: var(--accent); background: var(--accent-soft); }
-.tr-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
-.tr-dot.online { background: var(--online); }
-#trSend { margin-top: 16px; min-width: 260px; }
-#trSend:disabled { opacity: .5; box-shadow: none; cursor: default; }
-.tr-limits { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
-.tr-empty { margin: 0; color: var(--muted); }
-.tr-switch { margin: 14px 22px 0; max-width: 520px; padding: 4px; background: var(--panel); border-radius: 16px; display: flex; gap: 6px; }
-.tr-switch button { flex: 1; min-height: 40px; border: 0; border-radius: 12px; background: none; font-weight: 600; color: var(--muted); cursor: pointer; }
-.tr-switch button.on { background: var(--accent-soft); color: var(--accent); }
-#shareBody .share-box, #shareBody > * { max-width: 860px; }
+.tabs .ti { font-size: 18px; }
 .get-link { margin-top: 12px; }
-
-/* вкладки: значок сверху, подпись снизу — три вкладки помещаются в узкую колонку */
-.tabs { flex-wrap: nowrap; }
-.tabs button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-  min-height: 58px; border-radius: 16px; font-size: 13px; line-height: 1.1; }
-.tabs .ti { font-size: 20px; }
 #pcGoogle { margin-top: 12px; }
 
-/* четыре вкладки — сеткой 2×2: значок слева, подпись справа */
-.tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.tabs button { flex-direction: row; gap: 6px; min-height: 46px; padding: 0 6px; font-size: 14px; border-radius: 14px; }
-.tabs .ti { font-size: 18px; }
-.tabs .tab-dot { top: 6px; right: 8px; }
-/* «👥 Люди» */
-.pc-people { padding: 22px; }
-.pc-people > * { max-width: 760px; }
-.pc-people .pp-new { width: auto; min-width: 320px; }
+/* ---------- общий список чатов слева: телефон, мои компьютеры, люди */
+.chats-card { padding: 10px; }
+.chats-card h2 { margin: 4px 6px 8px; }
+.pc-sec { margin: 10px 8px 4px; font-size: 12px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--muted); }
+.pc-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px; border: 0; border-radius: 12px;
+  background: none; color: var(--ink); font: inherit; text-align: left; text-decoration: none; cursor: pointer;
+  transition: background .15s;
+}
+.pc-row:hover { background: var(--panel); }
+.pc-row.on { background: var(--accent-soft); }
+.pc-ava {
+  position: relative; width: 42px; height: 42px; flex-shrink: 0; border-radius: 50%;
+  display: grid; place-items: center; background: var(--grad); color: #fff; font-size: 18px; font-weight: 800;
+}
+.pc-ava .ico { width: 22px; height: 22px; }
+.pc-ava .online {
+  position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--online); border: 2px solid var(--panel-2);
+}
+.pc-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pc-txt b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pc-txt small { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pc-badge {
+  min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; display: grid; place-items: center;
+  background: var(--grad); color: #fff; font-size: 12px; font-weight: 700;
+}
+.pc-new { margin-top: 8px; }
+.pc-hint { margin: 2px 8px 6px !important; font-size: 13px !important; }
+
+/* ---------- чат с другим моим компьютером */
+.pc-send { justify-content: flex-start; gap: 14px; }
+.pc-send .btn { min-height: 46px; }
+.pc-limits { color: var(--muted); font-size: 14px; }
+#pcItems .progress { margin: 8px 0 2px; height: 8px; }
+#pcItems .tr-bar { height: 100%; width: 0; background: var(--grad); border-radius: 4px; transition: width .4s ease; }
+#pcItems .fsize { font-variant-numeric: tabular-nums; }
+#pcItems .msg { animation: none; }  /* лента перерисовывается при каждом обновлении — без «мигания» */

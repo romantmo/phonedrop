@@ -1,4 +1,4 @@
-// PhoneDrop — телефон: список компьютеров, чаты, подключение по QR, уведомления.
+// PhoneDrop — телефон: общий список чатов (компьютеры и люди), подключение по QR, инструменты, уведомления.
 "use strict";
 
 (() => {
@@ -10,8 +10,7 @@
   let openId = null;
   let installEvent = null;
   let reloadTimer = null;
-  let peopleMounted = false;
-  let tab = "chats"; // вкладка на главном экране: «Компьютеры», «Люди» или «Инструменты»
+  let tab = "chats"; // вкладка на главном экране: «Чаты» или «Инструменты»
 
   const chat = new Chat({
     role: ROLE,
@@ -31,8 +30,8 @@
     openId = chat.chatId = null;
     $("chatView").hidden = $("toolView").hidden = true;
     $("listView").hidden = false;
-    $("chatList").hidden = $("fabScan").hidden = $("pushBanner").hidden = $("googleBanner").hidden = true;
-    $("tabs").hidden = $("toolsHome").hidden = $("peopleHome").hidden = true;
+    $("chatList").hidden = $("fabAdd").hidden = $("pushBanner").hidden = $("googleBanner").hidden = true;
+    $("tabs").hidden = $("toolsHome").hidden = true;
     $("gate").hidden = false;
     $("gateTitle").textContent = title || "Добро пожаловать";
     $("gateText").textContent = text || "Войди через Google — и пользуйся без компьютера. Или открой PhoneDrop на своём компьютере и отсканируй QR-код.";
@@ -58,7 +57,7 @@
 
   function setTab(name) {
     tab = name;
-    for (const [id, value] of [["tabChats", "chats"], ["tabPeople", "people"], ["tabTools", "tools"]]) {
+    for (const [id, value] of [["tabChats", "chats"], ["tabTools", "tools"]]) {
       $(id).classList.toggle("on", tab === value);
       $(id).setAttribute("aria-selected", String(tab === value));
     }
@@ -66,39 +65,36 @@
   }
   $("tabChats").addEventListener("click", () => setTab("chats"));
   $("tabTools").addEventListener("click", () => setTab("tools"));
-  $("tabPeople").addEventListener("click", () => setTab("people"));
-  PDPeople.onUnread((n) => { $("peDot").hidden = !n; });
+  PDPeople.onChange(() => { if (!openId && tab === "chats" && $("gate").hidden) renderList(); });
 
   function renderList() {
     $("gate").hidden = true;
     $("tabs").hidden = false;
     const tools = tab === "tools";
-    const people = tab === "people";
     $("toolsHome").hidden = !tools;
-    $("peopleHome").hidden = !people;
-    $("chatList").hidden = $("fabScan").hidden = tools || people;
-    $("listView").querySelector(".status").textContent = people ? "переписка с людьми" : tools ? "инструменты" : "мои компьютеры";
+    $("chatList").hidden = $("fabAdd").hidden = tools;
+    $("listView").querySelector(".status").textContent = tools ? "инструменты" : "чаты";
     const acc = info && info.account;
     $("googleBanner").hidden = !(info && info.google && acc && !acc.google);
-    $("pushBanner").hidden = tools || people || !$("googleBanner").hidden || !(chats.length && push.status() === "default");
+    $("pushBanner").hidden = tools || !$("googleBanner").hidden || !(chats.length && push.status() === "default");
     $("menuAccount").hidden = !(info && info.google);
     $("menuAccount").textContent = acc && acc.google ? `👤 ${acc.email} · выйти` : "🔐 Привязать Google";
     if (tools) {
       PDTools.renderHome($("toolsHome"), (id) => openTool(id));
       return;
     }
-    if (people) {
-      if (!peopleMounted) { PDPeople.mount($("peopleHome")); peopleMounted = true; }
-      return;
-    }
+    const rooms = PDPeople.rooms();
     const list = $("chatList");
     list.replaceChildren();
-    if (!chats.length) {
+    if (!chats.length && !rooms.length) {
       list.append(el("div", { class: "empty list-empty" },
-        el("div", { class: "big" }, "🖥️"), el("b", {}, "Нет подключённых компьютеров"),
-        "Открой PhoneDrop на компьютере и нажми кнопку QR внизу."));
+        el("div", { class: "big" }, "💬"), el("b", {}, "Пока нет чатов"),
+        "Нажми ＋ внизу: подключи свой компьютер по QR-коду или начни чат с человеком по коду."));
       return;
     }
+    // Компьютеры
+    list.append(el("div", { class: "ci-section" }, "💻 Мои компьютеры"));
+    if (!chats.length) list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Мой компьютер» и отсканируй QR-код на экране компьютера."));
     for (const c of chats) {
       const preview = c.last ? (c.last.sender === "phone" ? "Вы: " : "") + c.last.preview : modeText(c);
       list.append(el("button", { class: "chat-item", type: "button", onclick: () => openChat(c.id) },
@@ -111,6 +107,20 @@
             el("span", { class: "ci-preview" }, preview),
             c.unread ? el("span", { class: "badge" }, String(c.unread)) : null),
           c.last ? el("div", { class: "ci-mode" }, modeText(c)) : null)));
+    }
+    // Люди
+    list.append(el("div", { class: "ci-section" }, "👥 Люди"));
+    if (!rooms.length) list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Чат с человеком»: переписка и файлы до 10 ГБ по коду, без регистрации."));
+    for (const r of rooms) {
+      list.append(el("button", { class: "chat-item", type: "button", onclick: () => PDPeople.open(r.id) },
+        el("div", { class: "avatar person" }, (r.title.trim()[0] || "?").toUpperCase(), r.online ? el("span", { class: "online" }) : null),
+        el("div", { class: "ci-main" },
+          el("div", { class: "ci-row" },
+            el("span", { class: "ci-name" }, r.title),
+            el("span", { class: "ci-time" }, r.last ? fmtTime(r.last.created) : "")),
+          el("div", { class: "ci-row" },
+            el("span", { class: "ci-preview" }, PDPeople.preview(r)),
+            r.unread ? el("span", { class: "badge" }, String(r.unread)) : null))));
     }
   }
 
@@ -206,8 +216,6 @@
       reloadSoon();
     } else if (msg.type === "chats_changed") {
       reloadSoon();
-    } else if (msg.type === "shares_changed") {
-      PDShares.refresh();  // кто-то скачал файл из посылки
     } else if (msg.type === "rooms_changed") {
       PDPeople.refreshSoon();  // новое сообщение в чате с человеком
     }
@@ -265,11 +273,7 @@
     }
     chat.connect();
     push.sync(ROLE, info.vapid_key);
-    PDPeople.refresh();  // красная точка на «Люди», если есть непрочитанные
-    if (params.get("tab") === "people") {
-      history.replaceState(null, "", "/chat");
-      setTab("people");
-    }
+    PDPeople.refresh();  // чаты с людьми — в том же списке
     const shared = params.get("shared");
     const toolId = params.get("t");
     if (toolId && PDTools.has(toolId)) {
@@ -412,7 +416,21 @@
     stream = null;
     $("scanner").hidden = true;
   }
-  for (const id of ["gateScan", "menuScan", "fabScan"]) $(id).addEventListener("click", () => openScanner());
+  $("gateScan").addEventListener("click", () => openScanner());
+
+  // ＋ внизу списка: подключить свой компьютер или начать чат с человеком.
+  $("fabAdd").addEventListener("click", () => {
+    const close = () => backdrop.remove();
+    const item = (text, sub, fn) => el("button", { type: "button", onclick: () => { close(); fn(); } },
+      el("span", { class: "add-item" }, el("b", {}, text), el("small", {}, sub)));
+    const backdrop = el("div", { class: "sheet-backdrop", onclick: (e) => e.target === backdrop && close() },
+      el("div", { class: "sheet" },
+        el("h3", {}, "Новый чат"),
+        item("💻 Мой компьютер", "Открой PhoneDrop на компьютере и отсканируй QR-код", () => openScanner()),
+        item("👤 Чат с человеком", "Получишь код — собеседник введёт его на сайте", () => PDPeople.askNewChat()),
+        el("button", { type: "button", class: "cancel", onclick: close }, "Отмена")));
+    document.body.append(backdrop);
+  });
   $("scanClose").addEventListener("click", closeScanner);
 
   // ---------- установка как приложение (PWA)

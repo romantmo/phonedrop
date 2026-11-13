@@ -25,7 +25,7 @@
       <img class="logo" src="/static/icons/icon-192.png" alt="">
       <div class="who">
         <div class="name">PhoneDrop</div>
-        <div class="status">мои компьютеры</div>
+        <div class="status">чаты</div>
       </div>
       <button class="icon-btn" id="listMenuBtn" type="button" aria-label="Меню">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>
@@ -33,16 +33,12 @@
     </header>
     <nav class="menu" id="listMenu" hidden>
       <button type="button" id="installBtn" hidden>📲 Установить приложение</button>
-      <button type="button" id="menuScan">📷 Подключить компьютер</button>
       <button type="button" id="menuPush">🔔 Уведомления</button>
       <button type="button" id="menuAccount" hidden></button>
-      <a class="menu-link" href="/get">🔑 У меня есть код</a>
-      <a class="menu-link" href="/?desktop=1">💻 Открыть как компьютер</a>
     </nav>
 
     <div class="tabs" id="tabs" role="tablist" hidden>
-      <button type="button" role="tab" id="tabChats" class="on" aria-selected="true"><span class="ti">💻</span>Компьютеры</button>
-      <button type="button" role="tab" id="tabPeople" aria-selected="false"><span class="ti">👥</span>Люди<span class="tab-dot" id="peDot" hidden></span></button>
+      <button type="button" role="tab" id="tabChats" class="on" aria-selected="true"><span class="ti">💬</span>Чаты</button>
       <button type="button" role="tab" id="tabTools" aria-selected="false"><span class="ti">🛠</span>Инструменты</button>
     </div>
 
@@ -58,7 +54,6 @@
 
     <div class="chat-list" id="chatList"></div>
     <div class="tools-home" id="toolsHome" hidden></div>
-    <div class="people-home" id="peopleHome" hidden></div>
 
     <div class="gate" id="gate" hidden>
       <div class="card">
@@ -73,8 +68,8 @@
       </div>
     </div>
 
-    <button class="fab" id="fabScan" type="button" aria-label="Подключить компьютер" title="Подключить компьютер" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h7v7H3V3zm2 2v3h3V5H5zm9-2h7v7h-7V3zm2 2v3h3V5h-3zM3 14h7v7H3v-7zm2 2v3h3v-3H5zm9-2h2v2h-2v-2zm2 2h2v2h-2v-2zm2-2h3v2h-3v-2zm-4 4h2v3h-2v-3zm4 0h3v3h-2v-1h-1v-2z"/></svg>
+    <button class="fab" id="fabAdd" type="button" aria-label="Новый чат" title="Новый чат" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z"/></svg>
     </button>
   </section>
 
@@ -101,7 +96,6 @@
       <input type="file" id="toolPickInput" hidden>
       <div class="seg" id="toolOptions" hidden></div>
       <div class="scan-settings" id="scanSettings" hidden></div>
-      <div class="share-box" id="shareBox" hidden></div>
       <div class="tool-results" id="toolResults" hidden>
         <h3>Готово ✅</h3>
         <div class="tool-results-list" id="toolResultsList"></div>
@@ -219,7 +213,6 @@
 
 <script src="/static/chat.js"></script>
 <script src="/static/uploader.js"></script>
-<script src="/static/shares.js"></script>
 <script src="/static/scanner.js"></script>
 <script src="/static/tools.js"></script>
 <script src="/static/people.js"></script>

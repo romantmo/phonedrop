@@ -8,7 +8,7 @@
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
-<title>PhoneDrop — обмен файлами по коду</title>
+<title>PhoneDrop — вход в чат по коду</title>
 <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
 <link rel="icon" href="/static/icons/favicon-64.png" sizes="64x64">
 <link rel="stylesheet" href="/static/chat.css">
@@ -33,57 +33,18 @@
   <!-- Ввод кода -->
   <section class="g-card" id="codeCard" hidden>
     <h1>🔑 Введи код</h1>
-    <p>Код из 9 цифр, который тебе продиктовали или прислали: по нему можно войти в чат, получить файлы или отправить их. Регистрация не нужна.</p>
+    <p>Код из 9 цифр, который тебе продиктовали или прислали. Введи его — и попадёшь в чат: переписка, фото, голосовые и файлы. Регистрация не нужна.</p>
     <form id="codeForm" autocomplete="off">
       <input id="codeInput" inputmode="numeric" maxlength="11" placeholder="123 456 789" aria-label="Код" autofocus>
-      <button class="btn primary block" type="submit">Открыть</button>
+      <button class="btn primary block" type="submit">Войти в чат</button>
     </form>
   </section>
 
-  <!-- Пароль -->
-  <section class="g-card" id="pwCard" hidden>
-    <h1>🔒 Нужен пароль</h1>
-    <p id="pwText">Отправитель защитил файлы паролем. Спроси его — обычно пароль говорят голосом.</p>
-    <form id="pwForm" autocomplete="off">
-      <input id="pwInput" type="password" placeholder="Пароль" aria-label="Пароль">
-      <button class="btn primary block" type="submit">Открыть</button>
-    </form>
-  </section>
-
-  <!-- Файлы -->
-  <section class="g-card" id="filesCard" hidden>
-    <h1 id="filesTitle">Файлы для тебя</h1>
-    <p class="g-meta" id="filesMeta"></p>
-    <div class="g-list" id="filesList"></div>
-    <p class="g-note" id="filesNote"></p>
-  </section>
-
-  <!-- «Отправь файлы для …» (запрос файлов) -->
-  <section class="g-card" id="uploadCard" hidden>
-    <h1 id="upTitle">📤 Отправь файлы</h1>
-    <p class="g-meta" id="upMeta"></p>
-    <div class="g-drop" id="upDrop">
-      <span>Перетащи файлы сюда</span>
-      <button class="btn primary" id="upPick" type="button">📂 Выбрать файлы</button>
-      <input type="file" id="upInput" multiple hidden>
-    </div>
-    <div class="g-list" id="upList"></div>
-    <p class="g-note">Связь оборвалась — загрузка продолжится сама. Не закрывай страницу, пока всё не загрузится.</p>
-  </section>
-
-  <!-- Ошибка -->
-  <section class="g-card" id="errorCard" hidden>
-    <h1>😕 Не нашлось</h1>
-    <p id="errorText"></p>
-    <a class="btn block" href="/get">Ввести код ещё раз</a>
-  </section>
-
-  <p class="g-foot">🔒 Файлы хранятся не дольше суток и потом удаляются автоматически.</p>
+  <p class="g-foot">🔒 Файлы в чате хранятся сутки и потом удаляются автоматически.</p>
   <p class="g-foot"><a href="/chat?app=1">У меня есть свой аккаунт PhoneDrop</a></p>
 </main>
 
 <script src="/static/chat.js"></script>
-<script src="/static/uploader.js"></script>
 <script src="/static/guest.js"></script>
 </body>
 </html>

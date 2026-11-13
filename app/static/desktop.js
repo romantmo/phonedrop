@@ -1,9 +1,9 @@
-// PhoneDrop — компьютер: QR-код, режим «чужой/мой», уведомления, чат с телефоном.
+// PhoneDrop — компьютер: QR-код, режим «чужой/мой», уведомления и общий список чатов:
+// телефон, другие мои компьютеры (большие файлы) и люди (чаты по коду, открываются в новой вкладке).
 "use strict";
 
 (() => {
-  let peopleChecked = false;
-  const { $, api, toast, Chat, push } = PD;
+  const { $, el, api, toast, Chat, push } = PD;
   const ROLE = "pc";
   let state = null;
   let pairTimer = null;
@@ -27,9 +27,10 @@
     $("composer").hidden = !linked;
     $("logoutBtn").hidden = !linked;
     $("relinkBtn").hidden = !(linked && remember);
-    $("tabs").hidden = !linked;  // инструменты — только для подключённого к телефону компьютера
-    if (linked && !peopleChecked) { peopleChecked = true; PDPeople.refresh(); }  // точка на «Люди»
-    if (!linked) showSection("chat");
+    $("tabs").hidden = !linked;  // чаты и инструменты — только для подключённого к телефону компьютера
+    if (!linked) { showSection("chat"); selectChat("phone"); }
+    $("chatsCard").hidden = !linked || section !== "chat";
+    renderChats();
     if (document.activeElement !== $("deviceName")) {
       $("deviceName").value = state.device.label;
       $("saveNameBtn").hidden = true;
@@ -100,7 +101,7 @@
       $("pcGoogle").hidden = !(state.google && !state.linked);
       render();
       chat.connect();
-      if (state.linked) { push.sync(ROLE, state.vapid_key); PDTransfers.refresh(); }
+      if (state.linked) { push.sync(ROLE, state.vapid_key); PDPcChat.refresh(); PDPeople.refresh(); }
     } catch (e) {
       toast(e.message, true);
       setTimeout(start, 5000);
@@ -125,9 +126,7 @@
       toast("Телефон подключён");
       start();
     } else if (msg.type === "transfers_changed") {
-      PDTransfers.refresh();
-    } else if (msg.type === "shares_changed") {
-      PDShares.refresh();
+      PDPcChat.refresh();
     } else if (msg.type === "rooms_changed") {
       PDPeople.refreshSoon();
     } else if (msg.type === "relinked") {
@@ -212,22 +211,82 @@
     renderPush();
   });
 
-  // ---------- вкладки «Чат | Инструменты»
+  // ---------- вкладки «Чаты | Инструменты»
   let section = "chat";
+  let target = "phone";  // открытый чат: "phone" или id другого моего компьютера
   function showSection(name) {
     section = name;
-    $("dropZone").hidden = name !== "chat";
+    $("dropZone").hidden = name !== "chat" || target !== "phone";
+    $("pcMain").hidden = name !== "chat" || target === "phone";
     $("toolsMain").hidden = name !== "tools";
-    $("transfersMain").hidden = name !== "transfers";
-    $("peopleMain").hidden = name !== "people";
-    if (name === "people") PDPeople.mount($("peopleHome"));
-    if (name === "transfers") { $("trDot").hidden = true; PDTransfers.refresh(); }
-    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"], ["tabPeople", "people"], ["tabTransfers", "transfers"]]) {
+    $("chatsCard").hidden = !(state && state.linked) || name !== "chat";
+    for (const [id, value] of [["tabChat", "chat"], ["tabTools", "tools"]]) {
       $(id).classList.toggle("on", section === value);
       $(id).setAttribute("aria-selected", String(section === value));
     }
     if (name === "tools" && $("toolView").hidden) showToolsHome();
   }
+
+  function selectChat(id) {
+    target = PDPcChat.devices().some((d) => d.id === id) ? id : "phone";
+    if (target === "phone") PDPcChat.hide();
+    else PDPcChat.show(target);
+    showSection("chat");
+    renderChats();
+  }
+
+  // Общий список чатов слева.
+  const monitorIco = () => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ico");
+    svg.innerHTML = '<rect x="2.5" y="4" width="19" height="12.5" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8.5 20.5h7M12 16.5v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+    return svg;
+  };
+  function row(attrs, ava, title, sub, online, badge) {
+    return el(attrs.href ? "a" : "button", Object.assign({ class: "pc-row" + (attrs.on ? " on" : "") }, attrs.href
+      ? { href: attrs.href, target: "_blank", rel: "noopener" } : { type: "button", onclick: attrs.onclick }),
+    el("span", { class: "pc-ava" }, ava, online ? el("span", { class: "online" }) : null),
+    el("span", { class: "pc-txt" }, el("b", {}, title), el("small", {}, sub)),
+    badge ? el("span", { class: "pc-badge" }, badge) : null);
+  }
+  function renderChats() {
+    if (!state || !state.linked) return;
+    const pcs = PDPcChat.devices();
+    const rooms = PDPeople.rooms();
+    const items = [
+      el("div", { class: "pc-sec" }, "📱 Телефон"),
+      row({ on: target === "phone", onclick: () => selectChat("phone") }, "📱", "Мой телефон",
+        state.phone_online ? "в сети" : "не в сети", state.phone_online),
+      el("div", { class: "pc-sec" }, "💻 Мои компьютеры"),
+    ];
+    if (!pcs.length) {
+      items.push(el("p", { class: "pc-hint" }, "Открой PhoneDrop на другом компьютере и подключи тем же телефоном — сможешь кидать файлы до 10 ГБ."));
+    }
+    for (const d of pcs) {
+      items.push(row({ on: target === d.id, onclick: () => selectChat(d.id) }, monitorIco(), d.label,
+        d.online ? "в сети" : "не в сети", d.online, PDPcChat.unread(d.id) ? "•" : ""));
+    }
+    items.push(el("div", { class: "pc-sec" }, "👥 Люди"));
+    if (!rooms.length) items.push(el("p", { class: "pc-hint" }, "Переписка и файлы с кем угодно — по коду, без регистрации."));
+    for (const r of rooms) {
+      items.push(row({ href: PDPeople.url(r.id) }, (r.title.trim()[0] || "?").toUpperCase(), r.title,
+        PDPeople.preview(r), r.online, r.unread ? String(r.unread) : ""));
+    }
+    $("pcList").replaceChildren(...items);
+  }
+  PDPcChat.onChange(() => {
+    if (target !== "phone" && !PDPcChat.devices().some((d) => d.id === target)) selectChat("phone");
+    else renderChats();
+  });
+  PDPeople.onChange(renderChats);
+  PDPcChat.onIncoming((t) => toast(`📦 Пришёл файл «${t.name}» с «${t.from_label}»`));
+  $("pcNewPerson").addEventListener("click", () => PDPeople.askNewChat());
+  // Статусы «в сети» у других компьютеров и людей обновляем раз в 30 секунд.
+  setInterval(() => {
+    if (state && state.linked && !document.hidden) { PDPcChat.refresh(); PDPeople.refresh(); }
+  }, 30000);
+
   function showToolsHome() {
     $("toolView").hidden = true;
     $("toolsHome").hidden = false;
@@ -245,22 +304,6 @@
   }
   $("tabChat").addEventListener("click", () => showSection("chat"));
   $("tabTools").addEventListener("click", () => showSection("tools"));
-  $("tabTransfers").addEventListener("click", () => showSection("transfers"));
-  $("tabPeople").addEventListener("click", () => showSection("people"));
-  PDPeople.onUnread((n) => { $("peDot").hidden = !n; });
-  function transferMode(share) {
-    $("trModeMine").classList.toggle("on", !share);
-    $("trModeShare").classList.toggle("on", share);
-    $("mineBody").hidden = share;
-    $("shareBody").hidden = !share;
-    if (share) PDShares.mount($("shareBody"));
-  }
-  $("trModeMine").addEventListener("click", () => transferMode(false));
-  $("trModeShare").addEventListener("click", () => transferMode(true));
-  PDTransfers.onIncoming((t) => {
-    toast(`📦 Пришёл файл «${t.name}» с «${t.from_label}»`);
-    if (section !== "transfers") $("trDot").hidden = false;
-  });
   $("toolBack").addEventListener("click", showToolsHome);
 
   // ---------- «Переподключить телефон» (телефон переустановили или сменили)
