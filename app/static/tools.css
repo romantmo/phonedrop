@@ -280,3 +280,16 @@
   .sheet-backdrop:has(.pp-sheet) { align-items: center; justify-content: center; }
   .pp-sheet { max-width: 460px; border-radius: 22px; padding: 22px 20px; }
 }
+
+/* ---------- «👥 Пользователи» (админ) */
+.ad-add { display: flex; gap: 8px; }
+.ad-add input { flex: 1; min-width: 0; }
+.ad-list { display: flex; flex-direction: column; gap: 6px; max-height: 45vh; overflow-y: auto; }
+.ad-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: var(--panel-2); }
+.ad-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ad-info b { overflow-wrap: anywhere; font-size: 15px; }
+.ad-info small { color: var(--muted); font-size: 13px; }
+.sheet .ad-row .ad-del, .ad-del {
+  width: auto; padding: 8px 12px; border: 0; border-radius: 10px; background: none;
+  color: var(--danger); font-size: 14px; font-weight: 600; cursor: pointer;
+}

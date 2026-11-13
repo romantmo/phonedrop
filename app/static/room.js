@@ -30,7 +30,7 @@
   }
 
   function backUrl() {
-    if (!room || room.me === "guest") return "/get";
+    if (!room || room.me === "guest") return "/chat";
     return mobile ? "/chat" : "/";
   }
 

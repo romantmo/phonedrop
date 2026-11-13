@@ -150,3 +150,27 @@
 #pcItems .tr-bar { height: 100%; width: 0; background: var(--grad); border-radius: 4px; transition: width .4s ease; }
 #pcItems .fsize { font-variant-numeric: tabular-nums; }
 #pcItems .msg { animation: none; }  /* лента перерисовывается при каждом обновлении — без «мигания» */
+
+/* ---------- v1.9: настройки «⚙️ Этот компьютер» свёрнуты под одну строку */
+.tabs svg.ti { width: 18px; height: 18px; flex-shrink: 0; }
+.settings { padding: 0; }
+.settings summary {
+  display: flex; flex-direction: column; gap: 2px; padding: 14px 16px; cursor: pointer; list-style: none;
+  border-radius: 16px; font-weight: 700; font-size: 16px;
+}
+.settings summary::-webkit-details-marker { display: none; }
+.settings summary::after { content: "▾"; position: absolute; right: 16px; top: 14px; color: var(--muted); transition: transform .2s; }
+.settings { position: relative; }
+.settings[open] summary::after { transform: rotate(180deg); }
+.settings summary small { font-weight: 400; font-size: 13px; color: var(--muted); padding-right: 18px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.settings[open] summary small { display: none; }
+.settings > :not(summary) { margin-left: 16px; margin-right: 16px; }
+.settings > :last-child { margin-bottom: 16px; }
+.set-h { margin: 14px 16px 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.place-seg { margin-top: 0; }
+.place-seg button { min-height: 38px; font-size: 14px; }
+.note-text { margin-top: 12px !important; font-size: 13px !important; color: var(--muted); }
+.set-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.push-text { margin: 0 !important; font-size: 13px !important; color: var(--muted); }
+.pc-ava .ico { width: 22px; height: 22px; }

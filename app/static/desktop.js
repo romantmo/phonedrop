@@ -5,6 +5,7 @@
 (() => {
   const { $, el, api, toast, Chat, push } = PD;
   const ROLE = "pc";
+  let settingsFolded = false;
   let state = null;
   let pairTimer = null;
   let starting = false;
@@ -27,6 +28,14 @@
     $("composer").hidden = !linked;
     $("logoutBtn").hidden = !linked;
     $("relinkBtn").hidden = !(linked && remember);
+    $("usersBtn").hidden = !(linked && state.admin);
+    // Настройки открыты, пока компьютер не подключён (выбрать режим до сканирования), потом сворачиваются.
+    if (!linked) $("settingsBox").open = true;
+    else if (!settingsFolded) { settingsFolded = true; $("settingsBox").open = false; }
+    const place = state.device.place || "";
+    for (const b of document.querySelectorAll("#placeSeg button")) b.classList.toggle("on", b.dataset.place === place);
+    $("setSummary").textContent = [state.device.label, remember ? "🔒 постоянный" : "⏳ временный",
+      place === "home" ? "🏠 дом" : place === "work" ? "🏢 работа" : ""].filter(Boolean).join(" · ");
     $("tabs").hidden = !linked;  // чаты и инструменты — только для подключённого к телефону компьютера
     if (!linked) { showSection("chat"); selectChat("phone"); }
     $("chatsCard").hidden = !linked || section !== "chat";
@@ -37,10 +46,10 @@
     }
     for (const radio of document.querySelectorAll("input[name=mode]")) radio.checked = radio.value === state.device.mode;
     $("rememberHint").textContent =
-      `Запомнить его. Переписка сохраняется, файлы хранятся ${state.file_ttl_days} дней`;
+      `Запомнить компьютер. Переписка сохраняется, файлы хранятся ${state.file_ttl_days} дней. Для своих компьютеров — дома или на работе`;
     $("noteText").textContent = remember
-      ? "🏠 Выбирай только для своего компьютера: любой, кто сядет за него, увидит переписку. Отключить можно кнопкой ниже или с телефона."
-      : "🔒 Когда закроешь вкладку, через минуту переписка и файлы удалятся с сервера. Скачанные файлы остаются в «Загрузках» — на чужом компьютере удаляй их сам.";
+      ? "🔒 Любой, кто сядет за этот компьютер, увидит переписку. Отключить можно кнопкой ниже или с телефона."
+      : "⏳ Когда закроешь вкладку, через минуту переписка и файлы удалятся с сервера. Скачанные файлы остаются в «Загрузках» — на чужом компьютере удаляй их сам.";
     $("emptyIcon").textContent = linked ? "💬" : "📷";
     $("emptyTitle").textContent = linked ? "Пока пусто" : "Отсканируй QR-код слева";
     $("emptyText").textContent = linked
@@ -52,13 +61,12 @@
 
   function renderPush() {
     const status = push.status();
-    $("pushBox").hidden = !state.linked || status === "unsupported";
-    $("pushBtn").hidden = status !== "default";
+    const show = state.linked && status !== "unsupported";
+    $("pushBtn").hidden = !show || status !== "default";
+    $("pushText").hidden = !show || status === "default";
     $("pushText").textContent = status === "granted"
-      ? "✅ Включены. Придут, даже когда вкладка свёрнута."
-      : status === "denied"
-        ? "Запрещены в настройках браузера. Разреши их через значок замка в адресной строке."
-        : "Узнавай о сообщениях с телефона, даже когда вкладка свёрнута.";
+      ? "🔔 Уведомления включены — придут, даже когда вкладка свёрнута."
+      : "🔕 Уведомления запрещены в браузере. Разреши их через значок замка в адресной строке.";
   }
 
   function showPair(pair) {
@@ -135,6 +143,9 @@
     } else if (msg.type === "presence") {
       state.phone_online = msg.phone_online;
       render();
+    } else if (msg.type === "place") {
+      state.device.place = msg.place;  // поменяли с телефона
+      render();
     } else if (msg.type === "renamed") {
       state.device.label = msg.label; // переименовали с телефона
       render();
@@ -201,6 +212,21 @@
     if (document.activeElement !== $("saveNameBtn")) render();
   }, 150));
 
+  for (const b of document.querySelectorAll("#placeSeg button")) {
+    b.addEventListener("click", async () => {
+      try {
+        const { place } = await api(ROLE, "/api/pc/place", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ place: b.dataset.place }),
+        });
+        state.device.place = place;
+      } catch (e) {
+        toast(e.message, true);
+      }
+      render();
+    });
+  }
+  $("usersBtn").addEventListener("click", () => PDAdmin.open());
+
   $("pushBtn").addEventListener("click", async () => {
     try {
       await push.enable(ROLE, state.vapid_key);
@@ -250,22 +276,34 @@
     el("span", { class: "pc-txt" }, el("b", {}, title), el("small", {}, sub)),
     badge ? el("span", { class: "pc-badge" }, badge) : null);
   }
+  const phoneIco = () => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "ico");
+    svg.innerHTML = '<rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+    return svg;
+  };
+  const PLACES = [["home", "🏠 Дом"], ["work", "🏢 Работа"], ["", "💻 Другие компьютеры"]];
   function renderChats() {
     if (!state || !state.linked) return;
     const pcs = PDPcChat.devices();
     const rooms = PDPeople.rooms();
     const items = [
-      el("div", { class: "pc-sec" }, "📱 Телефон"),
-      row({ on: target === "phone", onclick: () => selectChat("phone") }, "📱", "Мой телефон",
+      el("div", { class: "pc-sec" }, "Телефон"),
+      row({ on: target === "phone", onclick: () => selectChat("phone") }, phoneIco(), "Мой телефон",
         state.phone_online ? "в сети" : "не в сети", state.phone_online),
-      el("div", { class: "pc-sec" }, "💻 Мои компьютеры"),
     ];
     if (!pcs.length) {
-      items.push(el("p", { class: "pc-hint" }, "Открой PhoneDrop на другом компьютере и подключи тем же телефоном — сможешь кидать файлы до 10 ГБ."));
+      items.push(el("div", { class: "pc-sec" }, "💻 Мои компьютеры"),
+        el("p", { class: "pc-hint" }, "Открой PhoneDrop на другом компьютере и подключи тем же телефоном — сможешь кидать файлы до 10 ГБ."));
     }
-    for (const d of pcs) {
-      items.push(row({ on: target === d.id, onclick: () => selectChat(d.id) }, monitorIco(), d.label,
-        d.online ? "в сети" : "не в сети", d.online, PDPcChat.unread(d.id) ? "•" : ""));
+    const groups = PLACES.filter(([key]) => pcs.some((d) => (d.place || "") === key));
+    for (const [key, title] of groups) {
+      items.push(el("div", { class: "pc-sec" }, groups.length === 1 && !key ? "💻 Мои компьютеры" : title));
+      for (const d of pcs.filter((x) => (x.place || "") === key)) {
+        items.push(row({ on: target === d.id, onclick: () => selectChat(d.id) }, monitorIco(), d.label,
+          d.online ? "в сети" : "не в сети", d.online, PDPcChat.unread(d.id) ? "•" : ""));
+      }
     }
     items.push(el("div", { class: "pc-sec" }, "👥 Люди"));
     if (!rooms.length) items.push(el("p", { class: "pc-hint" }, "Переписка и файлы с кем угодно — по коду, без регистрации."));

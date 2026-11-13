@@ -28,7 +28,8 @@ window.PDPeople = (() => {
   // Вторая строка в списке: последнее сообщение или «ждёт входа по коду».
   function preview(r) {
     if (!r.joined) return r.invite_expires ? "⏳ ждёт входа по коду" : "ещё не вошёл — открой чат и получи код";
-    if (r.last) return (r.last.sender === "owner" ? "Вы: " : "") + r.last.preview;
+    const me = r.guest ? "guest" : "owner";  // r.guest — я вошёл в этот чат по чужому коду
+    if (r.last) return (r.last.sender === me ? "Вы: " : "") + r.last.preview;
     return "вошёл в чат — напиши первым";
   }
 

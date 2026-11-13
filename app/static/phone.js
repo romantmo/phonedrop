@@ -11,6 +11,8 @@
   let installEvent = null;
   let reloadTimer = null;
   let tab = "chats"; // вкладка на главном экране: «Чаты» или «Инструменты»
+  // Собеседник по коду (без своего аккаунта): те же «Чаты | Инструменты», но только его чаты с людьми.
+  let guest = null;   // { rooms, vapid_key } в режиме гостя
 
   const chat = new Chat({
     role: ROLE,
@@ -52,8 +54,9 @@
   }
 
   function modeText(c) {
-    return c.mode === "remember" ? "🏠 мой компьютер" : "🏢 чужой — удалится после закрытия";
+    return c.mode === "remember" ? "🔒 постоянный — переписка хранится" : "⏳ временный — удалится после закрытия";
   }
+  const PLACES = [["home", "🏠 Дом"], ["work", "🏢 Работа"], ["", "💻 Другие компьютеры"]];
 
   function setTab(name) {
     tab = name;
@@ -74,57 +77,77 @@
     $("toolsHome").hidden = !tools;
     $("chatList").hidden = $("fabAdd").hidden = tools;
     $("listView").querySelector(".status").textContent = tools ? "инструменты" : "чаты";
-    const acc = info && info.account;
+    const acc = !guest && info && info.account;
     $("googleBanner").hidden = !(info && info.google && acc && !acc.google);
-    $("pushBanner").hidden = tools || !$("googleBanner").hidden || !(chats.length && push.status() === "default");
-    $("menuAccount").hidden = !(info && info.google);
-    $("menuAccount").textContent = acc && acc.google ? `👤 ${acc.email} · выйти` : "🔐 Привязать Google";
+    $("pushBanner").hidden = tools || !$("googleBanner").hidden || !((chats.length || guest) && push.status() === "default");
+    $("menuAccount").hidden = guest ? !guest.google : !(info && info.google);
+    $("menuAccount").textContent = guest ? "🔐 Войти через Google" : acc && acc.google ? `👤 ${acc.email} · выйти` : "🔐 Привязать Google";
+    $("menuUsers").hidden = !(acc && acc.admin);
     if (tools) {
       PDTools.renderHome($("toolsHome"), (id) => openTool(id));
       return;
     }
-    const rooms = PDPeople.rooms();
+    const rooms = guest ? guest.rooms : PDPeople.rooms();
     const list = $("chatList");
     list.replaceChildren();
+    if (guest) {  // собеседник по коду: только его чаты с людьми
+      list.append(el("div", { class: "ci-section" }, "👥 Мои чаты"));
+      for (const r of rooms) list.append(roomRow(r));
+      return;
+    }
     if (!chats.length && !rooms.length) {
       list.append(el("div", { class: "empty list-empty" },
         el("div", { class: "big" }, "💬"), el("b", {}, "Пока нет чатов"),
         "Нажми ＋ внизу: подключи свой компьютер по QR-коду или начни чат с человеком по коду."));
       return;
     }
-    // Компьютеры
-    list.append(el("div", { class: "ci-section" }, "💻 Мои компьютеры"));
-    if (!chats.length) list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Мой компьютер» и отсканируй QR-код на экране компьютера."));
-    for (const c of chats) {
-      const preview = c.last ? (c.last.sender === "phone" ? "Вы: " : "") + c.last.preview : modeText(c);
-      list.append(el("button", { class: "chat-item", type: "button", onclick: () => openChat(c.id) },
-        el("div", { class: "avatar" }, monitorIcon(), c.pc_online ? el("span", { class: "online" }) : null),
-        el("div", { class: "ci-main" },
-          el("div", { class: "ci-row" },
-            el("span", { class: "ci-name" }, c.label),
-            el("span", { class: "ci-time" }, c.last ? fmtTime(c.last.created) : "")),
-          el("div", { class: "ci-row" },
-            el("span", { class: "ci-preview" }, preview),
-            c.unread ? el("span", { class: "badge" }, String(c.unread)) : null),
-          c.last ? el("div", { class: "ci-mode" }, modeText(c)) : null)));
+    // Компьютеры — по местам: дом, работа, остальные
+    if (!chats.length) {
+      list.append(el("div", { class: "ci-section" }, "💻 Мои компьютеры"));
+      list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Мой компьютер» и отсканируй QR-код на экране компьютера."));
+    }
+    const grouped = PLACES.filter(([key]) => chats.some((c) => (c.place || "") === key));
+    for (const [key, title] of grouped) {
+      list.append(el("div", { class: "ci-section" }, grouped.length === 1 && !key ? "💻 Мои компьютеры" : title));
+      for (const c of chats.filter((x) => (x.place || "") === key)) {
+        const preview = c.last ? (c.last.sender === "phone" ? "Вы: " : "") + c.last.preview : modeText(c);
+        list.append(el("button", { class: "chat-item", type: "button", onclick: () => openChat(c.id) },
+          el("div", { class: "avatar" }, monitorIcon(), c.pc_online ? el("span", { class: "online" }) : null),
+          el("div", { class: "ci-main" },
+            el("div", { class: "ci-row" },
+              el("span", { class: "ci-name" }, c.label),
+              el("span", { class: "ci-time" }, c.last ? fmtTime(c.last.created) : "")),
+            el("div", { class: "ci-row" },
+              el("span", { class: "ci-preview" }, preview),
+              c.unread ? el("span", { class: "badge" }, String(c.unread)) : null),
+            c.last ? el("div", { class: "ci-mode" }, modeText(c)) : null)));
+      }
     }
     // Люди
     list.append(el("div", { class: "ci-section" }, "👥 Люди"));
     if (!rooms.length) list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Чат с человеком»: переписка и файлы до 10 ГБ по коду, без регистрации."));
-    for (const r of rooms) {
-      list.append(el("button", { class: "chat-item", type: "button", onclick: () => PDPeople.open(r.id) },
-        el("div", { class: "avatar person" }, (r.title.trim()[0] || "?").toUpperCase(), r.online ? el("span", { class: "online" }) : null),
-        el("div", { class: "ci-main" },
-          el("div", { class: "ci-row" },
-            el("span", { class: "ci-name" }, r.title),
-            el("span", { class: "ci-time" }, r.last ? fmtTime(r.last.created) : "")),
-          el("div", { class: "ci-row" },
-            el("span", { class: "ci-preview" }, PDPeople.preview(r)),
-            r.unread ? el("span", { class: "badge" }, String(r.unread)) : null))));
-    }
+    for (const r of rooms) list.append(roomRow(r));
+  }
+
+  function roomRow(r) {
+    return el("button", { class: "chat-item", type: "button", onclick: () => PDPeople.open(r.id) },
+      el("div", { class: "avatar person" }, (r.title.trim()[0] || "?").toUpperCase(), r.online ? el("span", { class: "online" }) : null),
+      el("div", { class: "ci-main" },
+        el("div", { class: "ci-row" },
+          el("span", { class: "ci-name" }, r.title),
+          el("span", { class: "ci-time" }, r.last ? fmtTime(r.last.created) : "")),
+        el("div", { class: "ci-row" },
+          el("span", { class: "ci-preview" }, PDPeople.preview(r)),
+          r.unread ? el("span", { class: "badge" }, String(r.unread)) : null)));
   }
 
   async function loadChats() {
+    if (guest) {
+      guest = await api(ROLE, "/api/guest/rooms");
+      if (!guest.rooms.length) { guest = null; throw Object.assign(new Error("нет чатов"), { status: 401 }); }
+      if (!openId) renderList();
+      return;
+    }
     info = await api(ROLE, "/api/phone/chats");
     chats = info.chats;
     chat.maxUploadMb = info.max_upload_mb;
@@ -235,7 +258,9 @@
   else if (params.get("login") === "ok") toast("Вход выполнен ✅");
   if (params.has("login") || params.has("login_error")) history.replaceState(null, "", "/chat");
 
+  $("menuUsers").addEventListener("click", () => PDAdmin.open());
   $("menuAccount").addEventListener("click", async () => {
+    if (guest) { location.href = "/auth/google?role=phone"; return; }
     const acc = info && info.account;
     if (!acc || !acc.google) { location.href = "/auth/google?role=phone"; return; }
     if (!confirm(`Выйти из ${acc.email} на этом телефоне? Войти снова можно через Google.`)) return;
@@ -267,9 +292,19 @@
     try {
       await loadChats();
     } catch (e) {
-      if (e.status === 401) return showGate();
-      toast(e.message, true);
-      return setTimeout(start, 5000);
+      if (e.status !== 401) {
+        toast(e.message, true);
+        return setTimeout(start, 5000);
+      }
+      // Своего аккаунта нет. Может, это собеседник, вошедший в чат по коду?
+      try {
+        guest = {};
+        await loadChats();
+      } catch {
+        guest = null;
+        return showGate();
+      }
+      return startGuest();
     }
     chat.connect();
     push.sync(ROLE, info.vapid_key);
@@ -288,6 +323,21 @@
     }
     if (shared !== null) {
       toast(shared === "0" ? "Нечего было отправить" : `Отправлено на компьютер: ${shared}`, shared === "0");
+    }
+  }
+
+  // Режим собеседника: свои чаты по коду и инструменты. Обновляем список раз в 20 секунд.
+  function startGuest() {
+    document.body.dataset.guest = "1";
+    $("listView").querySelector(".name").textContent = "PhoneDrop";
+    push.sync(ROLE, guest.vapid_key);
+    setInterval(() => { if (!document.hidden && !openId && $("toolView").hidden) loadChats().catch(() => {}); }, 20000);
+    const toolId = params.get("t");
+    if (toolId && PDTools.has(toolId)) {
+      setTab("tools");
+      history.replaceState(null, "", "/chat");
+      history.pushState({ t: toolId }, "", `/chat?t=${toolId}`);
+      openTool(toolId, false);
     }
   }
 
@@ -322,6 +372,31 @@
     }
   });
 
+  $("placeBtn").addEventListener("click", () => {
+    const current = chats.find((c) => c.id === openId);
+    const chatId = openId;
+    const close = () => backdrop.remove();
+    const pick = (place) => async () => {
+      close();
+      try {
+        await api(ROLE, `/api/chats/${chatId}/place`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ place }),
+        });
+        if (current) current.place = place;
+        toast("Готово — в списке компьютер будет в этом разделе");
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+    const backdrop = el("div", { class: "sheet-backdrop", onclick: (e) => e.target === backdrop && close() },
+      el("div", { class: "sheet" }, el("h3", {}, "Где стоит этот компьютер?"),
+        ...PLACES.map(([key, title]) => el("button", { type: "button", onclick: pick(key) },
+          el("span", {}, key ? title : "💻 Не важно"),
+          current && (current.place || "") === key ? el("span", { class: "sheet-online" }, "✓") : null)),
+        el("button", { type: "button", class: "cancel", onclick: close }, "Отмена")));
+    document.body.append(backdrop);
+  });
+
   // «Переподключить компьютер»: на компьютере слетел вход и он показывает новый QR.
   // Сканируем его — и этот браузер получает старый чат со всей перепиской.
   $("reattachBtn").addEventListener("click", () => {
@@ -354,7 +429,7 @@
 
   async function enablePush() {
     try {
-      await push.enable(ROLE, info.vapid_key);
+      await push.enable(ROLE, guest ? guest.vapid_key : info.vapid_key);
       toast("Уведомления включены");
     } catch (e) {
       toast(e.message, true);
@@ -420,6 +495,7 @@
 
   // ＋ внизу списка: подключить свой компьютер или начать чат с человеком.
   $("fabAdd").addEventListener("click", () => {
+    if (guest) { location.href = "/get"; return; }  // собеседник: войти ещё в один чат по коду
     const close = () => backdrop.remove();
     const item = (text, sub, fn) => el("button", { type: "button", onclick: () => { close(); fn(); } },
       el("span", { class: "add-item" }, el("b", {}, text), el("small", {}, sub)));

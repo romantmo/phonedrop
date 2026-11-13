@@ -205,6 +205,12 @@ CREATE TABLE IF NOT EXISTS transfers (
     done       REAL
 );
 CREATE INDEX IF NOT EXISTS transfers_by_account ON transfers(account_id);
+-- Кому разрешён вход через Google (кроме админов из ALLOWED_EMAILS). Добавляет админ в приложении.
+CREATE TABLE IF NOT EXISTS allowed_users (
+    email    TEXT PRIMARY KEY,
+    added_by TEXT,
+    created  REAL NOT NULL
+);
 -- Чаты с людьми: владелец (аккаунт) + один собеседник без регистрации.
 CREATE TABLE IF NOT EXISTS rooms (
     id             TEXT PRIMARY KEY,
@@ -363,6 +369,7 @@ class Store:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
         add("accounts", "google_sub", "google_sub TEXT")
         add("accounts", "email", "email TEXT")
+        add("devices", "place", "place TEXT NOT NULL DEFAULT ''")  # v1.9: где стоит компьютер — дом / работа
         # v1.8: «Посылки» и «Попросить файлы» заменены чатами с людьми — убираем их таблицы и файлы.
         for table in ("share_sessions", "share_access", "share_files", "shares"):
             self.db.execute(f"DROP TABLE IF EXISTS {table}")
@@ -561,6 +568,35 @@ class Store:
         self.run("DELETE FROM push_subs WHERE owner=?", f"dev:{device_id}")
         self.run("DELETE FROM devices WHERE id=?", device_id)  # сообщения удалятся каскадом
 
+    # ---------- пользователи (вход через Google)
+    def email_allowed(self, email: str) -> bool:
+        """Админы — из ALLOWED_EMAILS (файл .env на сервере), остальных добавляет админ в приложении."""
+        admins = self.settings.allowed_emails
+        if not admins and not self.one("SELECT 1 FROM allowed_users"):
+            return True  # список не задан — вход открыт (так работает локальная разработка)
+        return email in admins or bool(self.one("SELECT 1 FROM allowed_users WHERE email=?", email))
+
+    def is_admin(self, acc: sqlite3.Row) -> bool:
+        return bool(acc["email"]) and acc["email"] in self.settings.allowed_emails
+
+    async def delete_account(self, acc: sqlite3.Row, reason: str) -> None:
+        """Доступ закрыт: выходим на всех устройствах и удаляем всё, что принадлежит аккаунту."""
+        for dev in self.q("SELECT * FROM devices WHERE account_id=?", acc["id"]):
+            await self.close_device(dev, reason)
+        for room in self.q("SELECT id FROM rooms WHERE account_id=?", acc["id"]):
+            await self.close_room(room["id"], "room_closed")
+        for t in self.q("SELECT id FROM transfers WHERE account_id=?", acc["id"]):
+            self.delete_transfer(t["id"])
+        for ws in list(self.phone_sockets.pop(acc["id"], set())):
+            try:
+                await ws.send_json({"type": "closed", "reason": reason})
+                await ws.close(code=4000)
+            except Exception:
+                pass
+        self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{acc['id']}")
+        self.delete_owner_tools(f"acc:{acc['id']}")
+        self.run("DELETE FROM accounts WHERE id=?", acc["id"])
+
     def pc_online(self, device_id: str) -> bool:
         return bool(self.pc_sockets.get(device_id))
 
@@ -754,6 +790,7 @@ class Store:
             "id": dev["id"],
             "label": dev["label"],
             "mode": dev["mode"],
+            "place": dev["place"],
             "pc_online": self.pc_online(dev["id"]),
             "unread": unread,
             "last": {"sender": last["sender"], "preview": preview(last), "created": last["created"]} if last else None,
@@ -1085,7 +1122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def require_phone(request: Request) -> sqlite3.Row:
         role_of(request, "phone")
         acc = store.account_by_token(request.cookies.get(PHONE_COOKIE))
-        if not acc:
+        if not acc or (acc["email"] and settings.google_enabled and not store.email_allowed(acc["email"])):
             raise not_linked
         store.run("UPDATE accounts SET last_active=? WHERE id=?", time.time(), acc["id"])
         return acc
@@ -1124,11 +1161,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data.update(
             linked=bool(dev["account_id"]),
             chat_id=dev["id"],
-            device={"label": dev["label"], "mode": dev["mode"]},
+            device={"label": dev["label"], "mode": dev["mode"], "place": dev["place"]},
         )
         if dev["account_id"]:
             data["messages"] = store.messages(dev["id"])
             data["phone_online"] = store.phone_online(dev["account_id"])
+            owner = store.one("SELECT * FROM accounts WHERE id=?", dev["account_id"])
+            data["admin"] = bool(owner) and store.is_admin(owner)
         if pair:
             code, expires = pair
             url = f"{base_url(request)}/pair/{code}"
@@ -1320,8 +1359,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         acc = require_phone(request)
         return role, f"acc:{acc['id']}", acc
 
+    def guest_key(request: Request) -> str | None:
+        """Отпечаток ключа собеседника (cookie pd_rg), если он вошёл хотя бы в один чат."""
+        key = request.cookies.get(ROOM_COOKIE)
+        if key and store.one("SELECT 1 FROM rooms WHERE guest_hash=?", token_hash(key)):
+            return token_hash(key)
+        return None
+
+    def tool_user(request: Request) -> str:
+        """Кто пользуется инструментами: компьютер, аккаунт — или собеседник по коду (гость)."""
+        role = role_of(request)
+        if role == "pc":
+            return f"dev:{require_pc(request)['id']}"
+        if store.account_by_token(request.cookies.get(PHONE_COOKIE)):
+            return f"acc:{require_phone(request)['id']}"
+        if g := guest_key(request):
+            return f"guest:{g}"
+        raise not_linked
+
     def owner_from_cookies(request: Request) -> set[str]:
         owners = set()
+        if g := guest_key(request):
+            owners.add(f"guest:{g}")
         if pc := store.device_by_token(request.cookies.get(PC_COOKIE)):
             owners.add(f"dev:{pc['id']}")
         if acc := store.account_by_token(request.cookies.get(PHONE_COOKIE)):
@@ -1378,15 +1437,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # С телефона главная страница сразу ведёт в приложение для телефона.
         # Планшеты (без слова Mobile) остаются «компьютером». ?desktop=1 — открыть страницу компьютера вручную.
         if not desktop and guest_only(request):
-            return RedirectResponse("/get", status_code=302)
+            return RedirectResponse("/chat", status_code=302)
         if not desktop and is_phone(request.headers.get("user-agent", "")):
             return RedirectResponse("/chat", status_code=302)
         return FileResponse(STATIC_DIR / "desktop.html")
 
     @app.get("/chat", include_in_schema=False)
-    async def phone_page(request: Request):
-        if guest_only(request) and not request.query_params:
-            return RedirectResponse("/get", status_code=302)
+    async def phone_page():
         return FileResponse(STATIC_DIR / "phone.html")
 
     @app.get("/pair/{code}", include_in_schema=False)
@@ -1580,8 +1637,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not ok:
             return login_failed(role, "Google вернул неверные данные — попробуй ещё раз")
         email = str(claims.get("email", "")).lower()
-        if settings.allowed_emails and email not in settings.allowed_emails:
-            return login_failed(role, f"Доступ закрыт: адреса {email} нет в списке разрешённых")
+        if not store.email_allowed(email):
+            return login_failed(role, f"Доступ закрыт: адреса {email} нет в списке разрешённых. Попроси владельца добавить его")
         sub = str(claims["sub"])
         account = store.one("SELECT * FROM accounts WHERE google_sub=?", sub)
         if role == "phone":
@@ -1626,6 +1683,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.delete_cookie(PHONE_COOKIE, path="/")
         return response
 
+    # ------------------------------------------------- пользователи (только админ)
+    # Админ — адреса из ALLOWED_EMAILS в файле .env на сервере. Он добавляет в приложении Gmail
+    # родных и коллег: они входят через Google, создают свои чаты и пользуются инструментами.
+    EMAIL_RE = re.compile(r"[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,190}\.[a-z]{2,24}")
+    MAX_USERS = 100
+
+    def require_admin(request: Request) -> sqlite3.Row:
+        role, _, who = tool_owner(request)
+        acc = store.one("SELECT * FROM accounts WHERE id=?", account_of(role, who))
+        if not acc or not store.is_admin(acc):
+            raise HTTPException(403, "Это может только администратор")
+        return acc
+
+    def users_public() -> dict:
+        rows = store.q("SELECT * FROM allowed_users ORDER BY created")
+        users = []
+        for r in rows:
+            acc = store.one("SELECT last_active FROM accounts WHERE email=?", r["email"])
+            users.append({"email": r["email"], "created": r["created"], "signed_in": bool(acc),
+                          "last_active": acc["last_active"] if acc else None})
+        return {"admins": sorted(settings.allowed_emails), "users": users, "google": settings.google_enabled}
+
+    @app.get("/api/admin/users")
+    async def admin_users(request: Request):
+        require_admin(request)
+        return users_public()
+
+    @app.post("/api/admin/users")
+    async def admin_add_user(request: Request):
+        admin = require_admin(request)
+        limiter.hit(f"admin:{admin['id']}", 60, 600)
+        body = await request.json()
+        email = (body.get("email") if isinstance(body, dict) and isinstance(body.get("email"), str) else "").strip().lower()
+        if not EMAIL_RE.fullmatch(email):
+            raise HTTPException(400, "Это не похоже на адрес почты. Пример: mama@gmail.com")
+        if email in settings.allowed_emails or store.one("SELECT 1 FROM allowed_users WHERE email=?", email):
+            raise HTTPException(409, "Этот адрес уже в списке")
+        if store.one("SELECT COUNT(*) AS n FROM allowed_users")["n"] >= MAX_USERS:
+            raise HTTPException(400, f"Не больше {MAX_USERS} пользователей")
+        store.run("INSERT INTO allowed_users (email, added_by, created) VALUES (?,?,?)", email, admin["email"], time.time())
+        return users_public()
+
+    @app.delete("/api/admin/users/{email}")
+    async def admin_remove_user(email: str, request: Request):
+        require_admin(request)
+        email = email.strip().lower()
+        if email in settings.allowed_emails:
+            raise HTTPException(400, "Администратора можно убрать только в файле .env на сервере")
+        if not store.one("SELECT 1 FROM allowed_users WHERE email=?", email):
+            raise HTTPException(404, "Такого адреса нет в списке")
+        store.run("DELETE FROM allowed_users WHERE email=?", email)
+        # Доступ закрыт сразу: выход на всех устройствах, его чаты и файлы удаляются.
+        for acc in store.q("SELECT * FROM accounts WHERE email=?", email):
+            await store.delete_account(acc, "access_revoked")
+        return users_public()
+
+    # ---------- где стоит компьютер: дом / работа (только для удобства списка)
+    PLACES = ("", "home", "work")
+
+    async def set_place(dev: sqlite3.Row, place) -> dict:
+        if place not in PLACES:
+            raise HTTPException(400, "Неизвестное место")
+        store.run("UPDATE devices SET place=? WHERE id=?", place, dev["id"])
+        await store.send_ws(store.pc_sockets.get(dev["id"], set()), {"type": "place", "place": place})
+        if dev["account_id"]:
+            await store.send_ws(store.phone_sockets.get(dev["account_id"], set()),
+                                {"type": "chats_changed", "chat_id": dev["id"]})
+        return {"place": place}
+
+    @app.post("/api/pc/place")
+    async def pc_place(request: Request):
+        dev = require_pc(request, linked=False)
+        body = await request.json()
+        return await set_place(dev, body.get("place") if isinstance(body, dict) else None)
+
+    @app.post("/api/chats/{chat_id}/place")
+    async def phone_place(chat_id: str, request: Request):
+        dev = phone_chat(require_phone(request), chat_id)
+        body = await request.json()
+        return await set_place(dev, body.get("place") if isinstance(body, dict) else None)
+
     @app.post("/api/pair/{code}")
     async def pair(code: str, request: Request):
         role_of(request, "phone")
@@ -1652,7 +1790,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def phone_chats(request: Request):
         acc = require_phone(request)
         data = common_info()
-        data["account"] = {"email": acc["email"], "google": bool(acc["google_sub"])}
+        data["account"] = {"email": acc["email"], "google": bool(acc["google_sub"]), "admin": store.is_admin(acc)}
         data["chats"] = store.phone_chats(acc["id"])
         return data
 
@@ -1826,7 +1964,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Другие мои компьютеры — куда можно отправить файл."""
         me = require_pc(request)
         rows = store.q("SELECT * FROM devices WHERE account_id=? AND id!=?", me["account_id"], me["id"])
-        devices = [{"id": d["id"], "label": d["label"], "mode": d["mode"], "online": store.pc_online(d["id"])}
+        devices = [{"id": d["id"], "label": d["label"], "mode": d["mode"], "place": d["place"],
+                    "online": store.pc_online(d["id"])}
                    for d in rows]
         devices.sort(key=lambda d: (not d["online"], d["label"].lower()))
         return {"devices": devices}
@@ -1983,8 +2122,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def room_guest_summary(room: sqlite3.Row) -> dict:
         last, unread = room_last(room["id"], "owner", room["guest_read_at"])
-        return {"id": room["id"], "title": room["owner_name"], "unread": unread, "last": last,
-                "online": store.room_online(room["id"], "owner"), "last_activity": room["last_activity"]}
+        return {"id": room["id"], "title": room["owner_name"], "unread": unread, "last": last, "guest": True,
+                "joined": True, "online": store.room_online(room["id"], "owner"), "last_activity": room["last_activity"]}
 
     def new_invite(rid: str, request: Request) -> dict:
         code = new_invite_code()
@@ -2060,9 +2199,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/rooms")
     async def list_rooms(request: Request):
         role, _, who = tool_owner(request)
-        rows = store.q("SELECT * FROM rooms WHERE account_id=? ORDER BY last_activity DESC", account_of(role, who))
-        return {"rooms": [room_summary(r) for r in rows], "idle_days": settings.room_idle_days,
-                "file_ttl_hours": settings.transfer_ttl_hours}
+        rooms = [room_summary(r) for r in
+                 store.q("SELECT * FROM rooms WHERE account_id=? ORDER BY last_activity DESC", account_of(role, who))]
+        # Чаты, куда этот же браузер вошёл по чужому коду, — в том же списке.
+        if g := guest_key(request):
+            rooms += [room_guest_summary(r) for r in store.q("SELECT * FROM rooms WHERE guest_hash=?", g)]
+        rooms.sort(key=lambda r: r["last_activity"], reverse=True)
+        return {"rooms": rooms, "idle_days": settings.room_idle_days, "file_ttl_hours": settings.transfer_ttl_hours}
 
     @app.post("/api/rooms")
     async def create_room(request: Request):
@@ -2258,7 +2401,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Чаты, в которые этот браузер вошёл по коду (для страницы /get)."""
         key = request.cookies.get(ROOM_COOKIE)
         rows = store.q("SELECT * FROM rooms WHERE guest_hash=? ORDER BY last_activity DESC", token_hash(key)) if key else []
-        return {"rooms": [room_guest_summary(r) for r in rows]}
+        return {"rooms": [room_guest_summary(r) for r in rows], "vapid_key": store.vapid_public,
+                "google": settings.google_enabled}
 
     def invite_by_token(token: str) -> sqlite3.Row:
         room = store.one("SELECT * FROM rooms WHERE invite_token=?", store.keyed_hash(token)) if token else None
@@ -2490,7 +2634,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/scan/pages")
     async def scan_add_pages(request: Request):
-        _, owner, _ = tool_owner(request)
+        owner = tool_user(request)
         limiter.hit(f"tool:{owner}", settings.tools_per_min, 60)
         ensure_disk_space()
         work = store.tmp_root / uuid.uuid4().hex
@@ -2552,7 +2696,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/scan/pdf")
     async def scan_make_pdf(request: Request):
-        _, owner, _ = tool_owner(request)
+        owner = tool_user(request)
         limiter.hit(f"tool:{owner}", settings.tools_per_min, 60)
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get("pages"), list) or not body["pages"]:
@@ -2609,7 +2753,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def run_tool(op: str, request: Request):
         if op not in TOOL_OPS:
             raise HTTPException(404, "Неизвестный инструмент")
-        role, owner, _ = tool_owner(request)
+        owner = tool_user(request)
         limiter.hit(f"tool:{owner}", settings.tools_per_min, 60)
         ensure_disk_space()
         work = store.tmp_root / uuid.uuid4().hex
@@ -2652,9 +2796,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         role = role_of(request)
         if role == "pc":
             return f"dev:{require_pc(request)['id']}"
-        if role == "phone":
+        if role == "phone" and store.account_by_token(request.cookies.get(PHONE_COOKIE)):
             return f"acc:{require_phone(request)['id']}"
-        # Страница чата с человеком: владелец — как его телефон/компьютер, собеседник — по своему ключу.
+        # Страница чата с человеком или приложение собеседника: владелец — как его телефон/компьютер, собеседник — по своему ключу.
         if acc := store.account_by_token(request.cookies.get(PHONE_COOKIE)):
             return f"acc:{acc['id']}"
         if (dev := store.device_by_token(request.cookies.get(PC_COOKIE))) and dev["account_id"]:

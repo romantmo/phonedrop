@@ -164,7 +164,7 @@ def test_pages_load(client):
 def test_new_pc_shows_qr_and_defaults_to_temp(pc):
     state = open_pc(pc)
     assert state["linked"] is False
-    assert state["device"] == {"label": "Windows · Chrome", "mode": "temp"}
+    assert state["device"] == {"label": "Windows · Chrome", "mode": "temp", "place": ""}
     assert state["pair"]["url"].startswith(f"{BASE}/pair/")
     assert state["pair"]["qr_svg"].startswith("<svg")
     assert "Max-Age" not in pc.raw_cookies["pd_pc"]  # «чужой»: cookie до закрытия браузера
@@ -1121,7 +1121,7 @@ def test_new_phone_logs_in_with_google_without_computer(gclient):
     r = google_login(phone, "phone", "Roman@Example.com", "g-1")
     assert r.headers["location"] == "/chat?login=ok"
     data = phone.get("/api/phone/chats").json()
-    assert data["chats"] == [] and data["account"] == {"email": "roman@example.com", "google": True}
+    assert data["chats"] == [] and data["account"] == {"email": "roman@example.com", "google": True, "admin": True}
     # без компьютера уже можно создавать чаты с людьми
     assert phone.post("/api/rooms", json={"title": "Саша"}).status_code == 200
 
@@ -1442,8 +1442,8 @@ def test_guest_home_redirects_to_his_chats(client, pc, phone):
     rid, code = new_room(phone)
     guest = join(client, code)
     r = guest.get("/")
-    assert r.status_code == 302 and r.headers["location"] == "/get"
-    assert guest.get("/chat").headers["location"] == "/get"
+    assert r.status_code == 302 and r.headers["location"] == "/chat"   # у собеседника — своё приложение
+    assert guest.get("/chat").status_code == 200
     assert guest.get(f"/room/{rid}").status_code == 200
     assert phone.get("/chat").status_code == 200     # у владельца — обычное приложение
 
@@ -1474,3 +1474,92 @@ def test_shares_api_is_gone(client, pc, phone):
     assert phone.post("/api/shares", json={}).status_code in (404, 405)
     assert client.get("/static/shares.js").status_code == 404
     assert Device(client, "room").post("/api/get/code", json={"code": "123456789"}).status_code == 404
+
+
+# ------------------------------------------------ v1.9: пользователи, инструменты для гостей, дом/работа
+
+
+def test_admin_adds_users_who_can_sign_in(gclient):
+    admin = Device(gclient, "phone")
+    google_login(admin, "phone", "roman@example.com", "g-1")
+    mama = Device(gclient, "phone")
+    r = google_login(mama, "phone", "mama@gmail.com", "g-mama")
+    assert "login_error" in r.headers["location"]                   # пока не в списке — нельзя
+    users = admin.get("/api/admin/users").json()
+    assert "roman@example.com" in users["admins"] and users["users"] == []
+    assert admin.post("/api/admin/users", json={"email": "не почта"}).status_code == 400
+    r = admin.post("/api/admin/users", json={"email": " Mama@Gmail.com "})
+    assert r.status_code == 200 and r.json()["users"][0]["email"] == "mama@gmail.com"
+    assert admin.post("/api/admin/users", json={"email": "mama@gmail.com"}).status_code == 409
+    r = google_login(mama, "phone", "mama@gmail.com", "g-mama")
+    assert r.headers["location"] == "/chat?login=ok"
+    me = mama.get("/api/phone/chats").json()["account"]
+    assert me["email"] == "mama@gmail.com" and me["admin"] is False
+    # обычный пользователь: свои чаты с людьми — да, управлять списком — нет
+    assert mama.post("/api/rooms", json={"title": "Сестра"}).status_code == 200
+    assert mama.get("/api/admin/users").status_code == 403
+    assert mama.post("/api/admin/users", json={"email": "x@gmail.com"}).status_code == 403
+    # админа из .env убрать из приложения нельзя
+    assert admin.delete("/api/admin/users/roman@example.com").status_code == 400
+    # убрали — доступ закрыт сразу, её чаты удалены
+    with mama.ws() as ws:
+        assert admin.delete("/api/admin/users/mama@gmail.com").status_code == 200
+        events = []
+        while not events or events[-1].get("type") != "closed":
+            events.append(ws.receive_json())
+        assert events[-1] == {"type": "closed", "reason": "access_revoked"}
+    assert mama.get("/api/phone/chats").status_code == 401
+    assert store(gclient).one("SELECT 1 FROM rooms") is None
+    assert "login_error" in google_login(Device(gclient, "phone"), "phone", "mama@gmail.com", "g-mama").headers["location"]
+
+
+def test_guest_uses_tools_and_has_own_app(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone)
+    guest = join(client, code)
+    app_guest = Device(client, "phone")    # то же устройство, но в приложении (роль phone)
+    app_guest.cookies = guest.cookies
+    rooms = app_guest.get("/api/guest/rooms").json()
+    assert rooms["rooms"][0]["id"] == rid and rooms["vapid_key"]
+    r = app_guest.post("/api/tools/images-jpg", files={"files": ("a.jpg", jpeg(), "image/jpeg")})
+    assert r.status_code == 200, r.text
+    url = r.json()["results"][0]["url"]
+    assert app_guest.get(url).status_code == 200
+    assert Device(client, "phone").get(url).status_code == 404       # чужой не скачает
+    # «отправить на компьютер» гостю недоступно — у него нет компьютеров
+    rid_res = r.json()["results"][0]["id"]
+    assert app_guest.post("/api/tools/send", json={"ids": [rid_res]}).status_code == 401
+    # без кода — инструментов нет
+    assert Device(client, "phone").post("/api/tools/images-jpg",
+                                        files={"files": ("a.jpg", jpeg(), "image/jpeg")}).status_code == 401
+    # уведомления собеседнику из приложения
+    sub = {"endpoint": "https://push.example/g2", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+    assert app_guest.post("/api/push/subscribe", json=sub).status_code == 200
+
+
+def test_account_sees_chats_joined_by_code_in_same_list(client, pc, phone):
+    pair(pc, phone)
+    rid, code = new_room(phone, title="Жена", owner_name="Роман")
+    # у жены свой аккаунт (другой телефон и компьютер), и она же вошла по коду Романа
+    wife = Device(client, "phone")
+    pair(Device(client, "pc"), wife)
+    wife_room = Device(client, "room")
+    wife_room.cookies = wife.cookies
+    assert wife_room.post("/api/get/code", json={"code": code}).status_code == 200
+    wife.cookies.update(wife_room.cookies)
+    own = wife.post("/api/rooms", json={"title": "Мама"}).json()["room"]["id"]
+    listed = {r["id"]: r for r in wife.get("/api/rooms").json()["rooms"]}
+    assert listed[rid]["guest"] is True and listed[rid]["title"] == "Роман"
+    assert own in listed and not listed[own].get("guest")
+
+
+def test_computer_place_home_or_work(client, two_pcs, phone):
+    home, office, office_id = two_pcs
+    assert office.post("/api/pc/place", json={"place": "work"}).json() == {"place": "work"}
+    assert office.post("/api/pc/place", json={"place": "дача"}).status_code == 400
+    chats = {c["id"]: c for c in phone.get("/api/phone/chats").json()["chats"]}
+    assert chats[office_id]["place"] == "work"
+    home_id = home.get("/api/state").json()["chat_id"]
+    assert phone.post(f"/api/chats/{home_id}/place", json={"place": "home"}).status_code == 200
+    assert home.get("/api/state").json()["device"]["place"] == "home"
+    assert {d["id"]: d["place"] for d in home.get("/api/pc/devices").json()["devices"]} == {office_id: "work"}

@@ -99,6 +99,7 @@ window.PDTools = (() => {
     $("toolCamera").hidden = !tool.camera || ON_PC;
     $("toolPick").textContent = tool.camera && !ON_PC ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
     $("toolSendPc").textContent = ON_PC ? "📱 На телефон" : "💻 На компьютер";
+    $("toolSendPc").hidden = document.body.dataset.guest === "1";  // у собеседника по коду нет своих компьютеров
     const pick = $("toolPickInput");
     pick.accept = tool.accept || "";
     pick.multiple = tool.multi;
