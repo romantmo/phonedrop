@@ -1563,3 +1563,9 @@ def test_computer_place_home_or_work(client, two_pcs, phone):
     assert phone.post(f"/api/chats/{home_id}/place", json={"place": "home"}).status_code == 200
     assert home.get("/api/state").json()["device"]["place"] == "home"
     assert {d["id"]: d["place"] for d in home.get("/api/pc/devices").json()["devices"]} == {office_id: "work"}
+
+
+def test_own_qr_scanner_is_served_for_iphone(client):
+    """v1.9.1: свой распознаватель QR (для любого браузера) лежит на нашем сервере — CSP разрешает только свои скрипты."""
+    r = client.get("/static/vendor/jsQR.min.js")
+    assert r.status_code == 200 and "jsQR" in r.text[:200]

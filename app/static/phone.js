@@ -447,32 +447,59 @@
   $("menuPush").addEventListener("click", pushMenu);
   $("chatMenuPush").addEventListener("click", pushMenu);
 
-  // ---------- сканер QR внутри приложения (Chrome на Android)
+  // ---------- сканер QR внутри приложения
+  // Распознаём QR своим кодом (jsQR лежит на нашем же сервере) — одинаково в любом браузере:
+  // Chrome и Samsung Internet на Android, Safari на iPhone, значок на рабочем столе.
   let stream = null;
+  let jsqrLoading = null;
+  function loadJsQR() {
+    if (window.jsQR) return Promise.resolve();
+    jsqrLoading = jsqrLoading || new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "/static/vendor/jsQR.min.js";
+      s.onload = resolve;
+      s.onerror = () => { jsqrLoading = null; reject(new Error("Не загрузился сканер — проверь интернет")); };
+      document.head.append(s);
+    });
+    return jsqrLoading;
+  }
   // onPair(код) — что делать с найденным кодом. Без него — обычное подключение нового компьютера.
   async function openScanner(onPair) {
-    if (!("BarcodeDetector" in window)) {
-      toast(typeof onPair === "function"
-        ? "В этом браузере нет сканера QR — открой PhoneDrop в Chrome"
-        : "Сканер недоступен в этом браузере — наведи обычную камеру телефона на QR-код", true);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast("Камера недоступна в этом браузере — наведи обычную камеру телефона на QR-код", true);
       return;
     }
+    try { await loadJsQR(); } catch (e) { toast(e.message, true); return; }
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     } catch {
-      toast("Нет доступа к камере", true);
+      toast("Нет доступа к камере. Разреши его в настройках браузера", true);
       return;
     }
     const video = $("cam");
     video.srcObject = stream;
     await video.play();
     $("scanner").hidden = false;
-    const detector = new BarcodeDetector({ formats: ["qr_code"] });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const decode = window.jsQR && (window.jsQR.default || window.jsQR);
+
+    function read() {
+      if (video.readyState < 2 || !video.videoWidth) return [];
+      const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));  // меньше — быстрее
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const found = decode(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+      return found ? [found.data] : [];
+    }
+
     const tick = async () => {
       if (!stream) return;
       try {
-        for (const code of await detector.detect(video)) {
-          const url = new URL(code.rawValue, location.href);
+        for (const value of read()) {
+          const url = new URL(value, location.href);
           // Принимаем только коды нашего же сайта.
           if (url.origin === location.origin && url.pathname.startsWith("/pair/")) {
             closeScanner();
@@ -482,7 +509,7 @@
           }
         }
       } catch { /* кадр не распознан */ }
-      requestAnimationFrame(tick);
+      setTimeout(tick, 120);  // ~8 кадров в секунду: быстро находит код и не греет телефон
     };
     tick();
   }
