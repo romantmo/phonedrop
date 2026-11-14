@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+import pypdfium2 as pdfium
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -30,6 +31,12 @@ def make_pdf(path: Path, pages: int) -> Path:
         writer.add_blank_page(width=595, height=842)
     with path.open("wb") as f:
         writer.write(f)
+    return path
+
+
+def out_dir(tmp_path: Path, name: str) -> Path:
+    path = tmp_path / name
+    path.mkdir()
     return path
 
 
@@ -261,3 +268,119 @@ def test_compress_pdf_http(tmp_path):
                     files={"files": ("scan.pdf", data, "application/pdf")})
     (pdf,) = unzip(r.content)
     assert pdf.startswith(b"%PDF") and len(pdf) < len(data) / 3
+
+
+# ------------------------------------------------------------ v2.2: новые инструменты
+
+
+def make_text_pdf(tmp_path, pages=3, name="text.pdf"):
+    """PDF с разными страницами (по ширине видно, какая где)."""
+    writer = PdfWriter()
+    for i in range(pages):
+        writer.add_blank_page(width=200 + 100 * i, height=800)
+    path = tmp_path / name
+    with path.open("wb") as f:
+        writer.write(f)
+    return path
+
+
+def test_images_convert_size_and_formats(tmp_path):
+    src = tmp_path / "a.png"
+    Image.new("RGBA", (3000, 1500), (10, 200, 30, 128)).save(src)
+    for fmt, kind in (("jpg", "JPEG"), ("png", "PNG"), ("webp", "WEBP")):
+        out_dir = tmp_path / fmt
+        out_dir.mkdir()
+        (out,) = ops.images_convert([src], out_dir, "1280", fmt)
+        with Image.open(out) as img:
+            assert img.format == kind and max(img.size) == 1280
+            assert ("A" in img.getbands()) == (fmt != "jpg")  # прозрачность остаётся, кроме JPG
+    out_dir = tmp_path / "orig"
+    out_dir.mkdir()
+    (out,) = ops.images_convert([src], out_dir, "orig", "jpg")
+    with Image.open(out) as img:
+        assert img.size == (3000, 1500)
+
+
+def test_pdf_pages_reorder_rotate_delete_split(tmp_path):
+    src = make_text_pdf(tmp_path, 3)
+    (out,) = ops.pdf_pages(src, out_dir(tmp_path, "one"), [{"i": 2, "rot": 90}, {"i": 0}])
+    reader = PdfReader(out)
+    assert len(reader.pages) == 2  # страница 2 удалена
+    assert float(reader.pages[0].mediabox.width) == 400 and reader.pages[0].rotation == 90
+    assert float(reader.pages[1].mediabox.width) == 200
+    parts = ops.pdf_pages(src, out_dir(tmp_path, "split"), [{"i": 0}, {"i": 1}, {"i": 2}], split=True)
+    assert [len(PdfReader(p).pages) for p in parts] == [1, 1, 1]
+    for bad in ([], [{"i": 3}], [{"i": 0, "rot": 45}], "x", [{"i": "0"}]):
+        with pytest.raises(ops.ConvertError):
+            ops.pdf_pages(src, out_dir(tmp_path, "bad" + str(abs(hash(str(bad))))), bad)
+
+
+def test_pdf_thumbs(tmp_path):
+    src = make_text_pdf(tmp_path, 2)
+    thumbs = ops.pdf_thumbs(src, out_dir(tmp_path, "t"))
+    assert len(thumbs) == 2
+    with Image.open(thumbs[0]) as img:
+        assert max(img.size) == 480
+
+
+def test_pdf_password_set_and_remove(tmp_path):
+    src = make_text_pdf(tmp_path, 2)
+    (locked,) = ops.pdf_protect(src, out_dir(tmp_path, "lock"), "секрет-123")
+    reader = PdfReader(locked)
+    assert reader.is_encrypted and not reader.decrypt("wrong")
+    with pytest.raises(ops.ConvertError, match="Неверный пароль"):
+        ops.pdf_unprotect(locked, out_dir(tmp_path, "bad"), "wrong")
+    (opened,) = ops.pdf_unprotect(locked, out_dir(tmp_path, "open"), "секрет-123")
+    reader = PdfReader(opened)
+    assert not reader.is_encrypted and len(reader.pages) == 2
+    with pytest.raises(ops.ConvertError, match="нет пароля"):
+        ops.pdf_unprotect(src, out_dir(tmp_path, "plain"), "x")
+    with pytest.raises(ops.ConvertError):
+        ops.pdf_protect(src, out_dir(tmp_path, "empty"), "")
+
+
+def test_pdf_sign_puts_signature_where_shown(tmp_path):
+    src = make_text_pdf(tmp_path, 2)
+    sig = tmp_path / "sig.png"
+    img = Image.new("RGBA", (400, 200), (0, 0, 0, 0))
+    for x in range(50, 350):  # «росчерк» синей линией
+        for dy in range(-3, 4):
+            img.putpixel((x, 100 + dy + (x % 40) // 10), (20, 30, 120, 255))
+    img.save(sig)
+    (out,) = ops.pdf_sign(src, sig, out_dir(tmp_path, "s"), {"page": 1, "x": 0.5, "y": 0.5, "w": 0.4})
+    reader = PdfReader(out)
+    assert len(reader.pages) == 2
+    assert not list(reader.pages[0].images)
+    assert len(list(reader.pages[1].images)) == 1
+    # Подпись видна именно в правой нижней части второй страницы (300×800): проверяем по картинке.
+    pdf = pdfium.PdfDocument(out)
+    page_img = pdf[1].render(scale=1).to_pil().convert("L")
+    w, h = page_img.size
+    assert page_img.crop((int(w * 0.5), int(h * 0.5), w, h)).getextrema()[0] < 120  # есть тёмные пиксели
+    assert page_img.crop((0, 0, int(w * 0.5), int(h * 0.5))).getextrema()[0] > 240  # слева сверху пусто
+    pdf.close()
+    blank = tmp_path / "blank.png"
+    Image.new("RGBA", (100, 50), (0, 0, 0, 0)).save(blank)
+    with pytest.raises(ops.ConvertError, match="пустая"):
+        ops.pdf_sign(src, blank, out_dir(tmp_path, "b"), {"page": 0, "x": 0.1, "y": 0.1, "w": 0.3})
+    with pytest.raises(ops.ConvertError):
+        ops.pdf_sign(src, sig, out_dir(tmp_path, "c"), {"page": 5, "x": 0.1, "y": 0.1, "w": 0.3})
+
+
+def test_pdf_sign_on_rotated_page(tmp_path):
+    src = make_text_pdf(tmp_path, 1)
+    rotated = tmp_path / "rot.pdf"
+    w = PdfWriter(clone_from=PdfReader(src))
+    w.pages[0].rotate(90)
+    with rotated.open("wb") as f:
+        w.write(f)
+    sig = tmp_path / "sig.png"
+    Image.new("RGBA", (200, 100), (0, 0, 0, 255)).save(sig)
+    (out,) = ops.pdf_sign(rotated, sig, out_dir(tmp_path, "r"), {"page": 0, "x": 0.0, "y": 0.0, "w": 0.3})
+    pdf = pdfium.PdfDocument(out)
+    img = pdf[0].render(scale=1).to_pil().convert("L")
+    pdf.close()
+    W, H = img.size
+    assert W > H  # страница лежит боком, как на экране
+    assert img.getpixel((5, 5)) < 60  # подпись в левом верхнем углу видимой страницы
+    assert img.getpixel((W - 5, H - 5)) > 240

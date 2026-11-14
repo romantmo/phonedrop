@@ -90,12 +90,13 @@ class Pusher:
         self.sent = []
         self.gone = set()
 
-    def __call__(self, info, data):
+    def __call__(self, info, data, ttl=None):
         from app.main import PushGone
 
         if info["endpoint"] in self.gone:
             raise PushGone()
         self.sent.append((info["endpoint"], data))
+        self.ttls = getattr(self, "ttls", []) + [ttl]
 
 
 @pytest.fixture
@@ -1582,3 +1583,52 @@ def test_push_always_visible_on_iphone(client):
     а открытому приложению передаём сообщение — оно само рисует баннер и играет звук."""
     sw = client.get("/sw.js").text
     assert "APPLE" in sw and "silent: true" in sw and "pd-push" in sw and "renotify: true" in sw
+
+
+# ------------------------------------------------- v2.2: новые инструменты через приложение
+
+def test_new_tools_sign_pages_password_photo(pc, phone, tmp_path):
+    from PIL import Image
+    from pypdf import PdfReader
+
+    pair(pc, phone)
+    pdf = make_pdf_bytes(3)
+    up = {"files": ("Договор.pdf", pdf, "application/pdf")}
+    # превью страниц для «Страниц PDF» и «Подписать»
+    r = phone.post("/api/tools/pdf-thumbs", files=up)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["results"]) == 3 and r.json()["results"][0]["mime"] == "image/jpeg"
+    # страницы: третью первой, вторую убрать
+    pages = json.dumps([{"i": 2, "rot": 90}, {"i": 0, "rot": 0}])
+    r = phone.post("/api/tools/pdf-pages", data={"pages": pages, "split": "one"}, files=up)
+    (res,) = r.json()["results"]
+    assert res["name"] == "Договор (страницы).pdf"
+    r = phone.post("/api/tools/pdf-pages", data={"pages": pages, "split": "split"}, files=up)
+    assert [x["name"] for x in r.json()["results"]] == ["Договор — стр. 1.pdf", "Договор — стр. 2.pdf"]
+    # пароль: поставить, неверный снять нельзя (ошибка понятная, на языке человека), верный — можно
+    r = phone.post("/api/tools/pdf-protect", data={"password": "1234"}, files=up)
+    locked = phone.get(r.json()["results"][0]["download_url"]).content
+    assert PdfReader(io.BytesIO(locked)).is_encrypted
+    lock_up = {"files": ("Договор (с паролем).pdf", locked, "application/pdf")}
+    phone.cookies["pd_lang"] = "en"
+    r = phone.post("/api/tools/pdf-unprotect", data={"password": "0000"}, files=lock_up)
+    assert r.status_code == 422 and r.json()["detail"] == "Wrong password"
+    del phone.cookies["pd_lang"]
+    r = phone.post("/api/tools/pdf-unprotect", data={"password": "1234"}, files=lock_up)
+    assert r.status_code == 200 and r.json()["results"][0]["name"] == "Договор (с паролем) (без пароля).pdf"
+    # подпись
+    buf = io.BytesIO()
+    Image.new("RGBA", (300, 120), (20, 30, 120, 255)).save(buf, "PNG")
+    sig = ("signature.png", buf.getvalue(), "image/png")
+    r = phone.post("/api/tools/pdf-sign", data={"sign": json.dumps({"page": 0, "x": 0.5, "y": 0.8, "w": 0.3})},
+                   files=[("files", up["files"]), ("files", sig)])
+    assert r.status_code == 200, r.text
+    signed = phone.get(r.json()["results"][0]["download_url"]).content
+    assert len(list(PdfReader(io.BytesIO(signed)).pages[0].images)) == 1
+    # подпись без PDF или огромная — отказ
+    assert phone.post("/api/tools/pdf-sign", files=[("files", sig)]).status_code == 400
+    # фото: размер и формат
+    r = phone.post("/api/tools/images-convert", data={"size": "800", "format": "webp"},
+                   files={"files": ("IMG_1.HEIC.jpg", jpeg(), "image/jpeg")})
+    (res,) = r.json()["results"]
+    assert res["name"].endswith(".webp") and res["mime"] == "image/webp"

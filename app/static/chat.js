@@ -401,7 +401,7 @@ window.PD = (() => {
     // ------------------------------------------------ меню «Прикрепить»
     // На телефоне — плитки (галерея, камера, файлы, место…). На компьютере — сразу выбор файла.
     openAttach() {
-      if (!matchMedia("(pointer: coarse)").matches) return this.pick({ multiple: true });
+      if (!matchMedia("(pointer: coarse)").matches) return this.pickFiles({ multiple: true });
       const close = () => {
         back.classList.remove("show");
         document.removeEventListener("keydown", onKey);
@@ -412,10 +412,10 @@ window.PD = (() => {
         el("button", { type: "button", class: "at-tile " + color, onclick: () => { close(); fn(); } },
           el("span", { class: "at-ico", "aria-hidden": "true" }, ico), el("b", {}, label), el("small", {}, sub));
       const tiles = [
-        tile("🖼", tx("Галерея"), tx("фото и видео"), "c1", () => this.pick({ accept: "image/*,video/*", multiple: true })),
-        tile("📷", tx("Камера"), tx("сделать фото"), "c2", () => this.pick({ accept: "image/*", capture: "environment" })),
-        tile("🎥", tx("Видео"), tx("снять видео"), "c3", () => this.pick({ accept: "video/*", capture: "environment" })),
-        tile("📁", tx("Файлы"), tx("Диск, Загрузки"), "c4", () => this.pick({ multiple: true })),
+        tile("🖼", tx("Галерея"), tx("фото и видео"), "c1", () => this.pickFiles({ accept: "image/*,video/*", multiple: true })),
+        tile("📷", tx("Камера"), tx("сделать фото"), "c2", () => this.pickFiles({ accept: "image/*", capture: "environment" })),
+        tile("🎥", tx("Видео"), tx("снять видео"), "c3", () => this.pickFiles({ accept: "video/*", capture: "environment" })),
+        tile("📁", tx("Файлы"), tx("Диск, Загрузки"), "c4", () => this.pickFiles({ multiple: true })),
         tile("📍", tx("Место"), tx("где я сейчас"), "c5", () => this.sendLocation()),
       ];
       // Контакты из телефонной книги умеет отдавать только Chrome на Android.
@@ -435,7 +435,8 @@ window.PD = (() => {
     }
 
     // Системное окно выбора файла. capture="environment" сразу открывает заднюю камеру.
-    pick({ accept = null, capture = null, multiple = false }) {
+    // (Не «pick»: так называется выбор того же файла для продолжения отправки в чатах с людьми.)
+    pickFiles({ accept = null, capture = null, multiple = false }) {
       const input = el("input", { type: "file", accept, capture, multiple, hidden: true });
       const done = () => setTimeout(() => input.remove(), 0);
       input.addEventListener("change", () => {

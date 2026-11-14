@@ -131,7 +131,10 @@ a { color: var(--link); }
 }
 .chat-head .who { flex: 1; min-width: 0; }
 .chat-head .name { font-weight: 700; font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-head .status { font-size: 14px; opacity: .85; transition: opacity .2s; }
+.chat-head .status {
+  font-size: 14px; opacity: .85; transition: opacity .2s;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .chat-head .icon-btn { color: var(--head-ink); }
 
 /* ---------- лента сообщений */
@@ -421,8 +424,13 @@ body.in-call { overflow: hidden; }
   position: relative; z-index: 2; padding: 12px 18px; border: 0; border-radius: 14px;
   background: #fff; color: #1d2433; font: inherit; font-weight: 600; cursor: pointer;
 }
-/* кнопки звонка в шапке чата */
+/* кнопки звонка в шапке чата: на узком экране всё компактнее, чтобы имя не сжималось в столбик */
 .chat-head .icon-btn.call-start { flex-shrink: 0; }
+@media (max-width: 480px) {
+  .chat-head { gap: 6px; padding-inline: 8px 4px; }
+  .chat-head .avatar { width: 40px; height: 40px; }
+  .chat-head .icon-btn { width: 40px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .call-ov .call-avatar, .call-btn.green { animation: none !important; }
 }

@@ -11,6 +11,8 @@ window.PDTools = (() => {
   const OFFICE_ACCEPT = ".doc,.docx,.docm,.odt,.rtf,.xls,.xlsx,.xlsm,.ods,.csv,.ppt,.pptx,.pps,.ppsx,.odp";
   const IMAGE_ACCEPT = "image/*,.heic,.heif";
 
+  const PDF_ACCEPT = "application/pdf,.pdf";
+
   const TOOLS = [
     {
       id: "scan", op: "scan", icon: "📷", title: tx("Сканер документов"),
@@ -18,6 +20,12 @@ window.PDTools = (() => {
       hint: tx("Сфотографируй страницы — лист найдётся сам. Нажми на страницу, чтобы поправить."),
       camera: true, scanner: true, accept: IMAGE_ACCEPT, multi: true, arrange: true, rotate: true, min: 1,
       action: tx("Сделать PDF"),
+    },
+    {
+      id: "sign", op: "pdf-sign", icon: "✍️", title: tx("Подписать PDF"),
+      sub: tx("Подпись пальцем или мышкой"),
+      hint: tx("Выбери PDF, нажми на страницу и поставь подпись туда, где нужно."),
+      accept: PDF_ACCEPT, multi: false, min: 1, pages: "sign", action: tx("Подписать"),
     },
     {
       id: "office", op: "office-pdf", icon: "📄", title: tx("Документ → PDF"),
@@ -29,35 +37,67 @@ window.PDTools = (() => {
       id: "compresspdf", op: "compress-pdf", icon: "🪶", title: tx("Сжать PDF"),
       sub: tx("Тяжёлый PDF → лёгкий"),
       hint: tx("Например, скан из почты на 20 МБ. Картинки внутри пережимаются, текст остаётся текстом — его можно выделять и искать."),
-      accept: "application/pdf,.pdf", multi: false, min: 1, action: tx("Сжать PDF"),
-      options: { key: "preset", def: "normal", choices: [["light", tx("Маленький")], ["normal", tx("Средний")], ["max", tx("Высокое качество")]] },
+      accept: PDF_ACCEPT, multi: false, min: 1, action: tx("Сжать PDF"),
+      opts: [{ key: "preset", def: "normal", choices: [["light", tx("Маленький")], ["normal", tx("Средний")], ["max", tx("Высокое качество")]] }],
     },
     {
       id: "merge", op: "merge-pdf", icon: "📎", title: tx("Объединить PDF"),
       sub: tx("Несколько PDF → один"),
       hint: tx("Выбери два или больше PDF и расставь в нужном порядке."),
-      accept: "application/pdf,.pdf", multi: true, arrange: true, min: 2, action: tx("Объединить"),
+      accept: PDF_ACCEPT, multi: true, arrange: true, min: 2, action: tx("Объединить"),
+    },
+    {
+      id: "pages", op: "pdf-pages", icon: "📑", title: tx("Страницы PDF"),
+      sub: tx("Разделить, удалить, повернуть"),
+      hint: tx("Убери лишние страницы, поверни или поменяй местами. Можно сохранить каждую страницу отдельным PDF."),
+      accept: PDF_ACCEPT, multi: false, min: 1, pages: "edit", action: tx("Готово"),
+      opts: [{ key: "split", def: "one", choices: [["one", tx("Один PDF")], ["split", tx("Каждая страница — отдельно")]] }],
     },
     {
       id: "pdfimg", op: "pdf-images", icon: "🖼", title: tx("PDF → картинки"),
       sub: tx("Каждая страница — отдельный JPG"),
       hint: tx("Удобно, чтобы отправить страницу документа как фото."),
-      accept: "application/pdf,.pdf", multi: false, min: 1, action: tx("Сделать картинки"),
+      accept: PDF_ACCEPT, multi: false, min: 1, action: tx("Сделать картинки"),
+    },
+    {
+      id: "lock", op: "pdf-protect", icon: "🔒", title: tx("Пароль на PDF"),
+      sub: tx("Поставить или снять"),
+      hint: tx("С паролем PDF откроет только тот, кто его знает. Снять пароль можно, если ты его помнишь."),
+      accept: PDF_ACCEPT, multi: false, min: 1,
+      opts: [{ key: "mode", def: "set", choices: [["set", tx("Поставить пароль")], ["remove", tx("Снять пароль")]] }],
+      field: { key: "password", type: "password", placeholder: tx("Пароль") },
+      opFor: (v) => (v.mode === "remove" ? "pdf-unprotect" : "pdf-protect"),
+      actionFor: (v) => (v.mode === "remove" ? tx("Снять пароль") : tx("Поставить пароль")),
     },
     {
       id: "compress", op: "images-jpg", icon: "🗜", title: tx("Сжать фото / HEIC → JPG"),
       sub: tx("Меньше размер, без геолокации"),
       hint: tx("Фото станут легче для почты и мессенджеров. Из них удаляются геолокация и данные телефона."),
       accept: IMAGE_ACCEPT, multi: true, min: 1,
-      options: { key: "preset", def: "email", choices: [["email", tx("Для почты")], ["small", tx("Сильнее")], ["original", tx("Только в JPG")]] },
+      opts: [{ key: "preset", def: "email", choices: [["email", tx("Для почты")], ["small", tx("Сильнее")], ["original", tx("Только в JPG")]] }],
       action: tx("Сжать"),
+    },
+    {
+      id: "photo", op: "images-convert", icon: "📐", title: tx("Размер и формат фото"),
+      sub: tx("Уменьшить, JPG / PNG / WebP"),
+      hint: tx("Уменьши фото до нужного размера или сохрани в другом формате. Данные о месте съёмки удаляются."),
+      accept: IMAGE_ACCEPT, multi: true, min: 1, action: tx("Готово"),
+      opts: [
+        { key: "size", def: "2048", label: tx("Размер"),
+          choices: [["orig", tx("Как есть")], ["2048", "2048 px"], ["1280", "1280 px"], ["800", "800 px"]] },
+        { key: "format", def: "jpg", label: tx("Формат"), choices: [["jpg", "JPG"], ["png", "PNG"], ["webp", "WebP"]] },
+      ],
     },
   ];
 
   let tool = null;
   let items = [];      // [{ file, rot, preview }]
   let results = [];
-  let option = null;
+  let optVals = {};    // выбранные настройки: { preset: "normal", ... }
+  let fieldVal = "";   // поле ввода (пароль)
+  let pages = [];      // «Страницы PDF» / «Подписать»: [{ i, rot, url }]
+  let pagesLoading = false;
+  let sign = null;     // { page, x, y, w } — где стоит подпись
   let busy = false;
   let uploading = 0;   // сколько фото сейчас загружается (сканер)
 
@@ -89,7 +129,10 @@ window.PDTools = (() => {
     tool = next;
     items = [];
     results = [];
-    option = tool.options ? tool.options.def : null;
+    pages = [];
+    sign = null;
+    fieldVal = "";
+    optVals = Object.fromEntries((tool.opts || []).map((o) => [o.key, o.def]));
     $("toolResults").hidden = true;
     $("toolIcon").textContent = tool.icon;
     $("toolTitle").textContent = tool.title;
@@ -118,13 +161,27 @@ window.PDTools = (() => {
     });
   }
 
+  const opFor = () => (tool.opFor ? tool.opFor(optVals) : tool.op);
+  const actionFor = () => (tool.actionFor ? tool.actionFor(optVals) : tool.action);
+
+  // Настройки инструмента: одна или несколько строк-переключателей и поле (пароль).
   function renderOptions() {
     const box = $("toolOptions");
-    box.hidden = !tool.options;
-    if (!tool.options) return;
-    box.replaceChildren(...tool.options.choices.map(([value, label]) =>
-      el("button", { type: "button", class: value === option ? "on" : "",
-        onclick: () => { option = value; renderOptions(); staleResults(); } }, label)));
+    const groups = tool.opts || [];
+    box.hidden = !groups.length && !tool.field;
+    const rows = groups.map((g) => el("div", { class: "opt-row" },
+      g.label ? el("div", { class: "opt-label" }, g.label) : null,
+      el("div", { class: "seg" }, ...g.choices.map(([value, label]) =>
+        el("button", { type: "button", class: value === optVals[g.key] ? "on" : "",
+          onclick: () => { optVals[g.key] = value; renderOptions(); staleResults(); render(); } }, label)))));
+    if (tool.field) {
+      const input = el("input", { class: "opt-input", type: tool.field.type, placeholder: tool.field.placeholder,
+        autocomplete: "off", maxlength: "128", dir: "auto" });
+      input.value = fieldVal;
+      input.addEventListener("input", () => { fieldVal = input.value; staleResults(); render(); });
+      rows.push(input);
+    }
+    box.replaceChildren(...rows);
   }
 
   function addFiles(list) {
@@ -139,6 +196,11 @@ window.PDTools = (() => {
       if (!files.length) return;
     }
     if (tool.scanner) return uploadScan(files);
+    if (tool.pages) {
+      items = [{ file: files[0], rot: 0, preview: null }];
+      staleResults();
+      return loadPages();
+    }
     if (!tool.multi) {
       items.forEach((i) => i.preview && URL.revokeObjectURL(i.preview));
       items = [];
@@ -148,6 +210,70 @@ window.PDTools = (() => {
       if (items.length >= MAX_FILES) { toast(tx("Не больше {0} файлов за раз", MAX_FILES), true); break; }
       items.push({ file, rot: 0, preview: isImage(file) ? URL.createObjectURL(file) : null });
     }
+    staleResults();
+    render();
+  }
+
+  // «Страницы PDF» и «Подписать»: сервер рисует маленькие картинки страниц.
+  async function loadPages() {
+    pages = [];
+    sign = null;
+    pagesLoading = true;
+    render();
+    const fd = new FormData();
+    fd.append("files", items[0].file, items[0].file.name);
+    try {
+      const data = await api(ROLE, "/api/tools/pdf-thumbs", { method: "POST", body: fd });
+      pages = data.results.map((r, i) => ({ i, rot: 0, url: r.url }));
+    } catch (e) {
+      items = [];
+      toast(e.message, true);
+    } finally {
+      pagesLoading = false;
+      render();
+    }
+  }
+
+  function movePage(k, delta) {
+    const j = k + delta;
+    if (j < 0 || j >= pages.length) return;
+    [pages[k], pages[j]] = [pages[j], pages[k]];
+    staleResults();
+    render();
+  }
+
+  // Плитка страницы: для «Страниц PDF» — повернуть, переставить, убрать; для «Подписать» — нажать и подписать.
+  function pdfPageCard(pg, k) {
+    const signed = sign && sign.page === pg.i;
+    const img = el("img", { src: pg.url, alt: "", loading: "lazy", class: "rot-" + pg.rot });
+    const thumbBox = el("div", { class: "pg-img" }, img);
+    if (signed && PDSign.image()) {
+      thumbBox.append(el("img", { class: "pg-sig", src: PDSign.image(), alt: "",
+        style: `left:${sign.x * 100}%;top:${sign.y * 100}%;width:${sign.w * 100}%` }));
+    }
+    if (tool.pages === "sign") {
+      return el("div", { class: "page-card" + (signed ? " signed" : "") },
+        el("button", { type: "button", class: "page-thumb", "aria-label": tx("Подписать страницу {0}", k + 1),
+          onclick: () => signPage(pg) },
+          thumbBox,
+          el("span", { class: "page-num" }, String(k + 1)),
+          el("span", { class: "page-status" }, signed ? tx("✍️ Изменить") : tx("✍️ Подписать здесь"))));
+    }
+    return el("div", { class: "page-card" },
+      el("div", { class: "page-thumb" }, thumbBox, el("span", { class: "page-num" }, String(pg.i + 1))),
+      el("div", { class: "page-ctrl" },
+        el("button", { type: "button", "aria-label": tx("Повернуть"),
+          onclick: () => { pg.rot = (pg.rot + 90) % 360; staleResults(); render(); } }, "⟳"),
+        el("button", { type: "button", class: "flip-rtl", "aria-label": tx("Раньше"), disabled: k === 0, onclick: () => movePage(k, -1) }, "←"),
+        el("button", { type: "button", class: "flip-rtl", "aria-label": tx("Позже"), disabled: k === pages.length - 1, onclick: () => movePage(k, 1) }, "→"),
+        el("button", { type: "button", class: "del", "aria-label": tx("Убрать"),
+          onclick: () => { pages.splice(k, 1); staleResults(); render(); } }, "✕")));
+  }
+
+  async function signPage(pg) {
+    const placed = await PDSign.place(pg.url, sign && sign.page === pg.i ? sign : null);
+    if (!placed) return;
+    sign = { page: pg.i, ...placed };
     staleResults();
     render();
   }
@@ -252,8 +378,35 @@ window.PDTools = (() => {
         el("button", { type: "button", class: "del", "aria-label": tx("Убрать"), onclick: () => removeItem(i) }, "✕")));
   }
 
-  function render() {
+  function renderPdfPages() {
     const list = $("toolFiles");
+    list.classList.remove("pages");
+    list.classList.toggle("still", pages.length > 0);  // без анимации появления при каждом нажатии
+    const file = items[0];
+    const head = file ? el("div", { class: "tf-item" },
+      el("div", { class: "tf-thumb" }, el("span", { class: "tf-ext" }, "pdf")),
+      el("div", { class: "tf-info" },
+        el("div", { class: "tf-name" }, file.file.name),
+        el("div", { class: "tf-size" }, pagesLoading ? tx("Загружаю страницы…") : tx("Страниц: {0}", pages.length))),
+      el("div", { class: "tf-ctrl" }, el("button", { type: "button", class: "del", "aria-label": tx("Убрать"),
+        onclick: () => { items = []; pages = []; sign = null; staleResults(); render(); } }, "✕"))) : null;
+    const grid = el("div", { class: "tool-files pages" }, ...pages.map((pg, k) => pdfPageCard(pg, k)));
+    list.replaceChildren(...[head, pages.length ? grid : null].filter(Boolean));
+    if (!file) list.append(el("div", { class: "tf-empty" }, tx("Файл ещё не выбран")));
+    if (pagesLoading) list.append(el("div", { class: "tf-empty" }, el("span", { class: "tf-spinner" })));
+    if (tool.pages === "sign" && pages.length && !sign) {
+      list.append(el("div", { class: "tf-empty" }, tx("Нажми на страницу, где нужна подпись")));
+    }
+    const run = $("toolRun");
+    const ready = tool.pages === "sign" ? !!sign : pages.length > 0;
+    run.disabled = busy || pagesLoading || !ready;
+    run.textContent = busy ? tx("Обрабатываю…") : actionFor();
+  }
+
+  function render() {
+    if (tool.pages) return renderPdfPages();
+    const list = $("toolFiles");
+    list.classList.remove("still");
     list.classList.toggle("pages", !!tool.scanner && items.length > 0);
     list.replaceChildren(...items.map((item, i) => tool.scanner ? pageCard(item, i) :
       el("div", { class: "tf-item" },
@@ -273,9 +426,9 @@ window.PDTools = (() => {
     }
     if (tool.camera) $("toolCamera").textContent = tx("📷 Камера");
     const run = $("toolRun");
-    run.disabled = busy || uploading > 0 || items.length < tool.min;
+    run.disabled = busy || uploading > 0 || items.length < tool.min || (tool.field && !fieldVal);
     run.textContent = busy ? tx("Обрабатываю…") : items.length && items.length < tool.min
-      ? tx("Нужно ещё {0}", tool.min - items.length) : tool.action;
+      ? tx("Нужно ещё {0}", tool.min - items.length) : actionFor();
   }
 
   // ---------- запуск
@@ -307,12 +460,19 @@ window.PDTools = (() => {
     }
   }
 
-  function run() {
+  async function run() {
     if (busy || uploading || items.length < tool.min) return;
     if (tool.scanner) return runScan();
     const fd = new FormData();
     for (const item of items) fd.append("files", item.file, item.file.name);
-    if (tool.options) fd.append(tool.options.key, option);
+    for (const [key, value] of Object.entries(optVals)) fd.append(key, value);
+    if (tool.field) fd.append(tool.field.key, fieldVal);
+    if (tool.pages === "edit") fd.append("pages", JSON.stringify(pages.map((pg) => ({ i: pg.i, rot: pg.rot }))));
+    if (tool.pages === "sign") {
+      if (!sign) return;
+      fd.append("files", await PDSign.blob(), "signature.png");
+      fd.append("sign", JSON.stringify(sign));
+    }
     if (tool.rotate) fd.append("rotations", items.map((i) => i.rot).join(","));
     if (tool.op === "images-pdf") fd.append("name", scanName());
     busy = true;
@@ -324,7 +484,7 @@ window.PDTools = (() => {
     bar.classList.remove("working");
     fill.style.width = "0%";
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/tools/${tool.op}`);
+    xhr.open("POST", `/api/tools/${opFor()}`);
     xhr.setRequestHeader("X-PD-Role", ROLE);
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;

@@ -106,7 +106,10 @@ window.PDCall = (() => {
     close(true);
     const initial = (call.name || "?").trim().charAt(0).toUpperCase();
     const node = el("div", { class: "call-ov", role: "dialog", "aria-label": call.video ? tx("Видеозвонок") : tx("Аудиозвонок") });
-    const remote = el("video", { class: "call-remote", playsinline: true, autoplay: true });
+    // Видео собеседника — в <video> без звука, звук — в отдельном <audio>: так надёжнее на iPhone.
+    const remote = el("video", { class: "call-remote", playsinline: true, autoplay: true, muted: true });
+    remote.muted = true;
+    const audio = el("audio", { autoplay: true });
     const local = el("video", { class: "call-local", playsinline: true, autoplay: true, muted: true, hidden: true });
     local.muted = true;
     const status = el("div", { class: "call-status" });
@@ -116,12 +119,13 @@ window.PDCall = (() => {
       status);
     const actions = el("div", { class: "call-actions" });
     const sound = el("button", { type: "button", class: "call-unmute", hidden: true, onclick: () => {
-      remote.play().then(() => (sound.hidden = true)).catch(() => {});
+      audio.play().then(() => (sound.hidden = true)).catch(() => {});
+      if (remote.srcObject) remote.play().catch(() => {});
     } }, tx("🔊 Нажми, чтобы слышать собеседника"));
-    node.append(remote, local, info, sound, actions);
+    node.append(remote, audio, local, info, sound, actions);
     document.body.append(node);
     document.body.classList.add("in-call");
-    ui = { node, remote, local, status, actions, info, sound };
+    ui = { node, remote, audio, local, status, actions, info, sound };
     return ui;
   }
 
@@ -216,12 +220,11 @@ window.PDCall = (() => {
 
   function newPeer(servers, call) {
     const pc = new RTCPeerConnection({ iceServers: servers });
-    const remote = new MediaStream();
-    cur.remote = remote;
-    ui.remote.srcObject = remote;
+    cur.remote = new MediaStream();
     pc.ontrack = (e) => {
-      remote.addTrack(e.track);
-      ui && ui.remote.play().catch(() => { if (ui) ui.sound.hidden = false; });
+      cur.remote.addTrack(e.track);
+      e.track.addEventListener("unmute", attachRemote);
+      attachRemote();
     };
     pc.onconnectionstatechange = () => {
       if (!cur || cur.pc !== pc) return;
@@ -244,6 +247,22 @@ window.PDCall = (() => {
       }
     };
     return pc;
+  }
+
+  // Подключить звук и видео собеседника к экрану. Safari не всегда замечает дорожки,
+  // добавленные в уже показанный поток, поэтому каждый раз отдаём элементам новый поток.
+  function attachRemote() {
+    if (!ui || !cur || !cur.remote) return;
+    const audioTracks = cur.remote.getAudioTracks();
+    const videoTracks = cur.remote.getVideoTracks();
+    if (audioTracks.length) {
+      ui.audio.srcObject = new MediaStream(audioTracks);
+      ui.audio.play().then(() => { if (ui) ui.sound.hidden = true; }).catch(() => { if (ui) ui.sound.hidden = false; });
+    }
+    if (videoTracks.length) {
+      ui.remote.srcObject = new MediaStream(videoTracks);
+      ui.remote.play().catch(() => { /* видео без звука играет само */ });
+    }
   }
 
   // Служебный канал: сообщаем собеседнику, включена ли у нас камера или показ экрана.

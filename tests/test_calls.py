@@ -99,18 +99,26 @@ def test_incoming_and_missed_call_push(client, pc, phone):
     sent = [json.loads(d) for e, d in client.pusher.sent if e == sub["endpoint"]]
     assert [p["title"] for p in sent] == ["📞 Входящий звонок", "📞 Пропущенный звонок"]
     assert all(p["tag"] == f"call-{cid}" and p["body"] == "Роман" and p["url"] == f"/room/{rid}" for p in sent)
+    assert [p["ring"] for p in sent] == [True, False]
+    assert client.pusher.ttls[-2:] == [60, 86400]  # входящий живёт минуту, «пропущенный» — сутки
 
 
-def test_nobody_answers(tmp_path):
-    settings = Settings(data_dir=tmp_path, public_url=BASE, call_ring_sec=0, min_free_disk_mb=0,
-                        devices_per_ip=1000, cleanup_interval_sec=3600)
+def test_nobody_answers_phone_rings_again_then_missed(tmp_path):
+    """Пока не ответили — push повторяется (спящий телефон звенит снова), потом «пропущенный»."""
+    settings = Settings(data_dir=tmp_path, public_url=BASE, call_ring_sec=0.35, call_rering_sec=0.1,
+                        min_free_disk_mb=0, devices_per_ip=1000, cleanup_interval_sec=3600)
     with TestClient(create_app(settings), base_url=BASE) as c:
-        c.app.state.store.push_sender = Pusher()
+        pusher = c.app.state.store.push_sender = Pusher()
         pc, phone = Device(c, "pc"), Device(c, "phone")
         rid, owner, guest = setup_room(c, pc, phone)
+        sub = {"endpoint": "https://push.example/g", "keys": {"p256dh": "a" * 87, "auth": "b" * 22}}
+        guest.post("/api/push/subscribe", json=sub)
         with room_ws(c, rid, owner) as ows:
             owner.post("/api/calls", json={"chat_id": rid, "sdp": SDP})
             assert wait_for(ows, "call_end")["reason"] == "missed"
+        c.portal.call(c.app.state.store.flush_push)
+        titles = [json.loads(d)["title"] for e, d in pusher.sent if e == sub["endpoint"]]
+        assert titles == ["📞 Входящий звонок"] * 4 + ["📞 Пропущенный звонок"]
         assert c.app.state.store.calls == {}
 
 

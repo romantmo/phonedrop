@@ -82,6 +82,30 @@ def _run(op: str, inputs: list[tuple[Path, str]], form: dict, out_dir: Path) -> 
         return ops.pdf_to_images(paths[0], out_dir)
     if op == "images-jpg":
         return ops.images_to_jpg(paths, out_dir, form.get("preset", "email"))
+    if op == "images-convert":
+        return ops.images_convert(paths, out_dir, form.get("size", "orig"), form.get("format", "jpg"))
+    if op in ("pdf-thumbs", "pdf-pages", "pdf-protect", "pdf-unprotect") and len(inputs) != 1:
+        raise ops.ConvertError("Нужен ровно один PDF")
+    if op == "pdf-thumbs":
+        return ops.pdf_thumbs(paths[0], out_dir)
+    if op == "pdf-pages":
+        try:
+            pages = json.loads(form.get("pages") or "[]")
+        except ValueError:
+            pages = None
+        return ops.pdf_pages(paths[0], out_dir, pages, form.get("split") == "split")
+    if op == "pdf-protect":
+        return ops.pdf_protect(paths[0], out_dir, form.get("password"))
+    if op == "pdf-unprotect":
+        return ops.pdf_unprotect(paths[0], out_dir, form.get("password"))
+    if op == "pdf-sign":
+        if len(inputs) != 2:
+            raise ops.ConvertError("Нужны PDF и подпись")
+        try:
+            params = json.loads(form.get("sign") or "{}")
+        except ValueError:
+            params = None
+        return ops.pdf_sign(paths[0], paths[1], out_dir, params)
     raise HTTPException(404, "Неизвестная операция")
 
 

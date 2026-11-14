@@ -39,6 +39,7 @@ self.addEventListener("push", (event) => {
       icon: "/static/icons/icon-192.png",
       badge: "/static/icons/badge-96.png",
       data: { url: data.url || "/" },
+      requireInteraction: !!data.ring,  // входящий звонок висит, пока не нажмёшь
       ...extra,
     });
   event.waitUntil(

@@ -103,7 +103,11 @@ OFFICE_EXTS = {
 }
 HEIC_EXTS = {"heic", "heif"}
 IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "avif"} | HEIC_EXTS
-TOOL_OPS = ("office-pdf", "images-pdf", "merge-pdf", "pdf-images", "images-jpg", "compress-pdf")
+TOOL_OPS = ("office-pdf", "images-pdf", "merge-pdf", "pdf-images", "images-jpg", "compress-pdf",
+            # v2.2: фото — размер и формат; страницы PDF (превью, правка); пароль; подпись
+            "images-convert", "pdf-thumbs", "pdf-pages", "pdf-protect", "pdf-unprotect", "pdf-sign")
+PDF_ONE_OPS = ("pdf-images", "compress-pdf", "pdf-thumbs", "pdf-pages", "pdf-protect", "pdf-unprotect")
+IMAGE_EXT_MIME = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
 
 
 def file_ext(name: str | None) -> str:
@@ -312,7 +316,8 @@ class Settings:
     turn_secret: str = field(default_factory=lambda: os.getenv("TURN_SECRET", ""))
     turn_host: str = field(default_factory=lambda: os.getenv("TURN_HOST", ""))
     turn_port: int = field(default_factory=lambda: _env_int("TURN_PORT", 3478))
-    call_ring_sec: int = field(default_factory=lambda: _env_int("CALL_RING_SEC", 45))
+    call_ring_sec: float = field(default_factory=lambda: _env_int("CALL_RING_SEC", 45))
+    call_rering_sec: float = field(default_factory=lambda: _env_int("CALL_RERING_SEC", 10))
 
     @property
     def google_enabled(self) -> bool:
@@ -856,32 +861,35 @@ class Store:
         await run_in_threadpool(shutil.rmtree, self.files_root / dev["id"], True)
 
     # ---------- push-уведомления
-    def _send_webpush(self, info: dict, data: str) -> None:
+    def _send_webpush(self, info: dict, data: str, ttl: int = DAY) -> None:
         from pywebpush import WebPushException, webpush
 
         subject = self.settings.vapid_subject or (
             self.settings.public_url if self.settings.public_url.startswith("https://") else "mailto:admin@localhost"
         )
         try:
+            # Urgency: high — доставить сразу, даже если телефон спит (иначе Android/iPhone
+            # копят «обычные» push и выдают пачкой позже). Мы шлём только то, что человек увидит.
             webpush(info, data=data, vapid_private_key=self.vapid, vapid_claims={"sub": subject},
-                    ttl=DAY, timeout=10)
+                    ttl=ttl, timeout=10, headers={"Urgency": "high"})
         except WebPushException as exc:
             if exc.response is not None and exc.response.status_code in (404, 410):
                 raise PushGone() from exc
             raise
 
-    def push(self, owner: str, payload: dict) -> None:
+    def push(self, owner: str, payload: dict, ttl: int = DAY) -> None:
+        """ttl — сколько секунд push может ждать доставки (звонок через минуту уже не нужен)."""
         for sub in self.q("SELECT * FROM push_subs WHERE owner=?", owner):
-            task = asyncio.create_task(self._push_one(sub, payload))
+            task = asyncio.create_task(self._push_one(sub, payload, ttl))
             self.push_tasks.add(task)
             task.add_done_callback(self.push_tasks.discard)
 
-    async def _push_one(self, sub: sqlite3.Row, payload: dict) -> None:
+    async def _push_one(self, sub: sqlite3.Row, payload: dict, ttl: int = DAY) -> None:
         info = {"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}}
         try:
             lang = sub["lang"] if "lang" in sub.keys() else "ru"
             text = {k: tr(v, lang) for k, v in payload.items()}  # каждому — на его языке
-            await run_in_threadpool(self.push_sender, info, json.dumps(text, ensure_ascii=False))
+            await run_in_threadpool(self.push_sender, info, json.dumps(text, ensure_ascii=False), ttl)
         except PushGone:
             self.run("DELETE FROM push_subs WHERE endpoint=?", sub["endpoint"])
         except Exception as exc:
@@ -1418,8 +1426,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return owners
 
     def result_names(op: str, inputs: list[tuple[Path, str, str]], count: int, title: str | None,
-                     lang: str = "ru") -> list[tuple[str, str]]:
+                     lang: str = "ru", options: dict | None = None) -> list[tuple[str, str]]:
         first = stem(inputs[0][1]) if inputs else "file"
+        options = options or {}
+        pdf = "application/pdf"
+        if op == "images-convert":
+            fmt = options.get("format") if options.get("format") in IMAGE_EXT_MIME else "jpg"
+            return [(f"{stem(inputs[i][1]) if i < len(inputs) else first}.{fmt}", IMAGE_EXT_MIME[fmt]) for i in range(count)]
+        if op == "pdf-thumbs":
+            return [(f"page-{i + 1}.jpg", "image/jpeg") for i in range(count)]
+        if op == "pdf-pages":
+            if count > 1 or options.get("split") == "split":
+                return [(tr(T("{first} — стр. {n}.pdf", first=first, n=i + 1), lang), pdf) for i in range(count)]
+            return [(tr(T("{first} (страницы).pdf", first=first), lang), pdf)]
+        if op == "pdf-protect":
+            return [(tr(T("{first} (с паролем).pdf", first=first), lang), pdf)]
+        if op == "pdf-unprotect":
+            return [(tr(T("{first} (без пароля).pdf", first=first), lang), pdf)]
+        if op == "pdf-sign":
+            return [(tr(T("{first} (подписан).pdf", first=first), lang), pdf)]
         if op == "office-pdf":
             return [(f"{first}.pdf", "application/pdf")]
         if op == "images-pdf":
@@ -1439,15 +1464,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if op == "office-pdf":
             if len(inputs) != 1 or file_ext(inputs[0][1]) not in OFFICE_EXTS:
                 raise HTTPException(400, "Выбери один документ Word, Excel или PowerPoint")
-        elif op in ("images-pdf", "images-jpg"):
+        elif op in ("images-pdf", "images-jpg", "images-convert"):
             if not all(is_image(name, mime) for _, name, mime in inputs):
                 raise HTTPException(400, "Здесь можно использовать только фото и картинки")
         elif op == "merge-pdf":
             if len(inputs) < 2 or not all(is_pdf(name, mime) for _, name, mime in inputs):
                 raise HTTPException(400, "Выбери хотя бы два PDF")
-        elif op in ("pdf-images", "compress-pdf"):
+        elif op in PDF_ONE_OPS:
             if len(inputs) != 1 or not is_pdf(inputs[0][1], inputs[0][2]):
                 raise HTTPException(400, "Выбери один PDF")
+        elif op == "pdf-sign":
+            # PDF и картинка подписи (PNG, нарисованная пальцем) — не больше 2 МБ
+            if (len(inputs) != 2 or not is_pdf(inputs[0][1], inputs[0][2]) or not is_image(inputs[1][1], inputs[1][2])
+                    or inputs[1][0].stat().st_size > 2 * MB):
+                raise HTTPException(400, "Нужны PDF и подпись")
 
     # ------------------------------------------------------------ страницы
 
@@ -2169,10 +2199,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                   "guest_online": store.room_online(rid, "guest"),
                                   "owner_online": store.room_online(rid, "owner")})
 
-    def push_room_owner(room: sqlite3.Row, payload: dict) -> None:
-        store.push(f"acc:{room['account_id']}", payload)
+    def push_room_owner(room: sqlite3.Row, payload: dict, ttl: int = DAY) -> None:
+        store.push(f"acc:{room['account_id']}", payload, ttl)
         for d in store.q("SELECT id FROM devices WHERE account_id=? AND mode='remember'", room["account_id"]):
-            store.push(f"dev:{d['id']}", payload)
+            store.push(f"dev:{d['id']}", payload, ttl)
 
     async def room_posted(room: sqlite3.Row, side: str, row: sqlite3.Row) -> dict:
         """Новое сообщение: показать обеим сторонам, обновить списки, отправить уведомление."""
@@ -2798,13 +2828,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise HTTPException(413, T("Слишком большой размер. Лимит {tool_max_mb} МБ за раз", tool_max_mb=settings.tool_max_mb))
                     mime = normalize_mime(up.content_type) or mimetypes.guess_type(up.filename or "")[0] or ""
                     inputs.append((dest, safe_filename(up.filename), mime))
-                options = {k: form.get(k) for k in ("mode", "rotations", "preset") if isinstance(form.get(k), str)}
+                # Пароль (для «Пароль на PDF») уходит только конвертеру и нигде не сохраняется.
+                options = {k: form.get(k)[:20000] for k in ("mode", "rotations", "preset", "size", "format", "pages",
+                                                            "split", "password", "sign")
+                           if isinstance(form.get(k), str)}
                 title = form.get("name") if isinstance(form.get("name"), str) else None
             finally:
                 await form.close()
             check_tool_inputs(op, inputs)
             outs = await run_converter(op, inputs, options, work / "out")
-            results = save_results(owner, outs, result_names(op, inputs, len(outs), title, lang_of(request)))
+            results = save_results(owner, outs, result_names(op, inputs, len(outs), title, lang_of(request), options))
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return {"results": results, "ttl_min": settings.tool_ttl_min}
@@ -2921,12 +2954,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         name, url = call_peer(call, call["callee"])
         title = (T("📞 Пропущенный звонок") if missed else
                  T("🎥 Входящий видеозвонок") if call["video"] else T("📞 Входящий звонок"))
-        payload = {"title": title, "body": name or "PhoneDrop", "url": url, "tag": f"call-{call['id']}"}
+        payload = {"title": title, "body": name or "PhoneDrop", "url": url, "tag": f"call-{call['id']}",
+                   "ring": not missed}
+        # Входящий звонок через минуту уже не нужен — пусть не приходит с опозданием.
+        ttl = DAY if missed else 60
         room = store.one("SELECT * FROM rooms WHERE id=?", call["chat_id"])
         if room and call["callee"] == "owner":
-            push_room_owner(room, payload)
+            push_room_owner(room, payload, ttl)
         elif room and room["guest_hash"]:
-            store.push(f"guest:{room['guest_hash']}", payload)
+            store.push(f"guest:{room['guest_hash']}", payload, ttl)
 
     async def end_call(cid: str, reason: str, by: str | None = None) -> None:
         call = store.calls.pop(cid, None)
@@ -2939,7 +2975,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             push_call(call, missed=True)
 
     async def ring_timeout(cid: str) -> None:
-        await asyncio.sleep(settings.call_ring_sec)
+        """Пока не ответили — каждые 10 секунд повторяем уведомление (телефон снова звенит),
+        через 45 секунд звонок становится пропущенным."""
+        waited = 0.0
+        step = settings.call_rering_sec
+        while step > 0 and waited + step < settings.call_ring_sec:
+            await asyncio.sleep(step)
+            waited += step
+            call = store.calls.get(cid)
+            if not call or call["state"] != "ringing":
+                return
+            push_call(call, missed=False)
+        await asyncio.sleep(max(0.0, settings.call_ring_sec - waited))
         call = store.calls.get(cid)
         if call and call["state"] == "ringing":
             await end_call(cid, "missed")

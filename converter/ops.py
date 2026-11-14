@@ -20,6 +20,7 @@ import pypdfium2 as pdfium
 from PIL import Image, ImageFilter, ImageOps
 from pillow_heif import register_heif_opener
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, NumberObject
 
 from . import scan
 
@@ -50,7 +51,7 @@ class ConvertError(Exception):
     """Понятная пользователю ошибка (текст показывается в приложении)."""
 
 
-def _open_image(path: Path) -> Image.Image:
+def _open_image(path: Path, keep_alpha: bool = False) -> Image.Image:
     try:
         img = Image.open(path)  # читает только заголовок — размер известен до распаковки
         if img.width * img.height > Image.MAX_IMAGE_PIXELS:
@@ -64,6 +65,8 @@ def _open_image(path: Path) -> Image.Image:
         raise ConvertError("Не получилось открыть картинку — файл повреждён или это не фото")
     # Телефоны часто сохраняют фото «боком» и пишут поворот в EXIF. Применяем его.
     img = ImageOps.exif_transpose(img)
+    if keep_alpha and img.mode in ("RGBA", "LA", "P", "PA"):
+        return img.convert("RGBA")
     if img.mode not in ("RGB", "L"):
         background = Image.new("RGB", img.size, "white")  # прозрачность → белый фон
         rgba = img.convert("RGBA")
@@ -374,4 +377,235 @@ def office_to_pdf(path: Path, ext: str, out_dir: Path) -> list[Path]:
     out = work / "document.pdf"
     if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
         raise ConvertError("Не получилось открыть документ — файл повреждён или защищён паролем")
+    return [out]
+
+
+# ------------------------------------------------------- фото: размер и формат
+
+IMAGE_FORMATS = {"jpg": ("JPEG", "jpg"), "png": ("PNG", "png"), "webp": ("WEBP", "webp")}
+IMAGE_SIZES = {"orig": 0, "2048": 2048, "1280": 1280, "800": 800}
+
+
+def images_convert(paths: list[Path], out_dir: Path, size: str = "orig", fmt: str = "jpg") -> list[Path]:
+    """Уменьшить фото по длинной стороне и/или сохранить в другом формате (JPG, PNG, WebP).
+    Данные о месте съёмки и телефоне (EXIF) не сохраняются."""
+    if not paths:
+        raise ConvertError("Добавь хотя бы одно фото")
+    if len(paths) > MAX_PAGES_IN:
+        raise ConvertError(f"Слишком много фото (максимум {MAX_PAGES_IN})")
+    pil_format, ext = IMAGE_FORMATS.get(fmt, IMAGE_FORMATS["jpg"])
+    max_side = IMAGE_SIZES.get(size, 0)
+    outs = []
+    for i, path in enumerate(paths):
+        img = _fit(_open_image(path, keep_alpha=pil_format != "JPEG"), max_side)
+        out = out_dir / f"photo-{i + 1:03d}.{ext}"
+        if pil_format == "JPEG":
+            img.save(out, "JPEG", quality=88, optimize=True, progressive=True)
+        elif pil_format == "PNG":
+            img.save(out, "PNG", optimize=True)
+        else:
+            img.save(out, "WEBP", quality=85, method=4)
+        outs.append(out)
+    return outs
+
+
+# ---------------------------------------------------- страницы PDF: превью и правка
+
+MAX_EDIT_PAGES = 100  # страниц в PDF для «Страниц PDF» и «Подписать»
+
+
+def _open_pdfium(path: Path) -> pdfium.PdfDocument:
+    try:
+        return pdfium.PdfDocument(path)
+    except pdfium.PdfiumError as exc:
+        if "password" in str(exc).lower():
+            raise ConvertError("PDF защищён паролем — сначала сними защиту")
+        raise ConvertError("Не получилось открыть PDF — файл повреждён")
+
+
+def pdf_thumbs(path: Path, out_dir: Path, max_side: int = 480) -> list[Path]:
+    """Маленькие картинки страниц — чтобы на экране было видно, что где."""
+    pdf = _open_pdfium(path)
+    try:
+        count = len(pdf)
+        if count > MAX_EDIT_PAGES:
+            raise ConvertError(f"В PDF {count} страниц, максимум — {MAX_EDIT_PAGES}")
+        outs = []
+        for i in range(count):
+            page = pdf[i]
+            w, h = page.get_size()
+            img = page.render(scale=max_side / max(w, h, 1)).to_pil().convert("RGB")
+            out = out_dir / f"thumb-{i + 1:03d}.jpg"
+            img.save(out, "JPEG", quality=72)
+            outs.append(out)
+            page.close()
+        return outs
+    finally:
+        pdf.close()
+
+
+def _page_list(raw, count: int) -> list[tuple[int, int]]:
+    """Список страниц из приложения: [{"i": номер с 0, "rot": 0/90/180/270}, ...] в нужном порядке."""
+    if not isinstance(raw, list) or not raw:
+        raise ConvertError("Оставь хотя бы одну страницу")
+    if len(raw) > MAX_TOTAL_PAGES:
+        raise ConvertError(f"Слишком много страниц (максимум {MAX_TOTAL_PAGES})")
+    pages = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConvertError("Неверный список страниц")
+        i, rot = item.get("i"), item.get("rot", 0)
+        if not isinstance(i, int) or not 0 <= i < count or rot not in (0, 90, 180, 270):
+            raise ConvertError("Неверный список страниц")
+        pages.append((i, rot))
+    return pages
+
+
+def pdf_pages(path: Path, out_dir: Path, raw_pages, split: bool = False) -> list[Path]:
+    """Собрать PDF из выбранных страниц: порядок, поворот, удаление. split — каждая страница отдельным PDF."""
+    reader = _read_pdf(path)
+    pages = _page_list(raw_pages, len(reader.pages))
+    if split and len(pages) > 200:
+        raise ConvertError("Слишком много файлов (максимум 200)")
+    groups = [[p] for p in pages] if split else [pages]
+    outs = []
+    for n, group in enumerate(groups):
+        writer = PdfWriter()
+        for i, rot in group:
+            page = writer.add_page(reader.pages[i])
+            if rot:
+                page.rotate(rot)
+        out = out_dir / f"part-{n + 1:03d}.pdf"
+        with out.open("wb") as f:
+            writer.write(f)
+        outs.append(out)
+    return outs
+
+
+# ------------------------------------------------------------- пароль на PDF
+
+
+def _check_password(password) -> str:
+    if not isinstance(password, str) or not 1 <= len(password) <= 128:
+        raise ConvertError("Пароль — от 1 до 128 символов")
+    return password
+
+
+def pdf_protect(path: Path, out_dir: Path, password) -> list[Path]:
+    """Поставить пароль на открытие (шифрование AES-256)."""
+    password = _check_password(password)
+    reader = _read_pdf(path)
+    writer = PdfWriter(clone_from=reader)
+    writer.encrypt(user_password=password, owner_password=None, algorithm="AES-256")
+    out = out_dir / "result.pdf"
+    with out.open("wb") as f:
+        writer.write(f)
+    return [out]
+
+
+def pdf_unprotect(path: Path, out_dir: Path, password) -> list[Path]:
+    """Снять пароль, если его знаешь."""
+    password = _check_password(password)
+    try:
+        reader = PdfReader(path)
+        encrypted = reader.is_encrypted
+    except Exception:
+        raise ConvertError("Не получилось открыть PDF — файл повреждён")
+    if not encrypted:
+        raise ConvertError("У этого PDF нет пароля")
+    try:
+        ok = reader.decrypt(password)
+    except Exception:
+        ok = 0
+    if not ok:
+        raise ConvertError("Неверный пароль")
+    writer = PdfWriter(clone_from=reader)
+    out = out_dir / "result.pdf"
+    with out.open("wb") as f:
+        writer.write(f)
+    return [out]
+
+
+# -------------------------------------------------------------- подписать PDF
+
+
+def _signature_image(path: Path) -> Image.Image:
+    """Подпись с телефона: PNG с прозрачным фоном. Обрезаем пустые края."""
+    try:
+        img = Image.open(path)
+        if img.width * img.height > 4_000_000:
+            raise ConvertError("Подпись слишком большая")
+        img = img.convert("RGBA")
+    except ConvertError:
+        raise
+    except Exception:
+        raise ConvertError("Не получилось прочитать подпись")
+    box = img.getchannel("A").getbbox()
+    if not box:
+        raise ConvertError("Подпись пустая — нарисуй её ещё раз")
+    return img.crop(box)
+
+
+def _image_stream(img: Image.Image, gray: bool = False):
+    stream = DecodedStreamObject()
+    stream.set_data(img.tobytes())
+    stream = stream.flate_encode()
+    stream.update({
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Image"),
+        NameObject("/Width"): NumberObject(img.width),
+        NameObject("/Height"): NumberObject(img.height),
+        NameObject("/ColorSpace"): NameObject("/DeviceGray" if gray else "/DeviceRGB"),
+        NameObject("/BitsPerComponent"): NumberObject(8),
+    })
+    return stream
+
+
+def pdf_sign(path: Path, sig_path: Path, out_dir: Path, params) -> list[Path]:
+    """Ставит подпись (картинку) на страницу. params: page — номер с 0; x, y — левый верхний угол
+    подписи, w — её ширина; всё в долях видимой страницы (0…1), как человек видел на экране."""
+    if not isinstance(params, dict):
+        raise ConvertError("Неверное место для подписи")
+    try:
+        index = int(params.get("page"))
+        x, y, w = (float(params.get(k)) for k in ("x", "y", "w"))
+    except (TypeError, ValueError):
+        raise ConvertError("Неверное место для подписи")
+    if not (0 <= x < 1 and 0 <= y < 1 and 0.02 <= w <= 1):
+        raise ConvertError("Неверное место для подписи")
+    reader = _read_pdf(path)
+    if not 0 <= index < len(reader.pages):
+        raise ConvertError("Неверное место для подписи")
+    sig = _signature_image(sig_path)
+
+    writer = PdfWriter(clone_from=reader)
+    page = writer.pages[index]
+    page.transfer_rotation_to_content()  # повёрнутая страница: координаты как на экране
+    box = page.cropbox
+    pw, ph = float(box.width), float(box.height)
+    width = w * pw
+    height = width * sig.height / sig.width
+    left = float(box.left) + x * pw
+    bottom = float(box.top) - y * ph - height
+
+    # Отдельная страница-«наклейка» с подписью, которую накладываем поверх нужной страницы.
+    stamp = PdfWriter()
+    sheet = stamp.add_blank_page(width=float(page.mediabox.right) + 1, height=float(page.mediabox.top) + 1)
+    rgb = _image_stream(sig.convert("RGB"))
+    rgb[NameObject("/SMask")] = stamp._add_object(_image_stream(sig.getchannel("A"), gray=True))
+    content = DecodedStreamObject()
+    content.set_data(f"q {width:.3f} 0 0 {height:.3f} {left:.3f} {bottom:.3f} cm /PdSign Do Q".encode())
+    sheet[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({NameObject("/PdSign"): stamp._add_object(rgb)}),
+    })
+    sheet[NameObject("/Contents")] = stamp._add_object(content)
+    sheet[NameObject("/MediaBox")] = ArrayObject([FloatObject(v) for v in page.mediabox])
+    buf = io.BytesIO()
+    stamp.write(buf)
+    buf.seek(0)
+    page.merge_page(PdfReader(buf).pages[0])
+
+    out = out_dir / "result.pdf"
+    with out.open("wb") as f:
+        writer.write(f)
     return [out]
