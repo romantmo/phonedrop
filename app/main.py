@@ -1071,7 +1071,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         h.setdefault("X-Frame-Options", "DENY")
         h.setdefault("Referrer-Policy", "no-referrer")
         h.setdefault("Cross-Origin-Opener-Policy", "same-origin")
-        h.setdefault("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
+        h.setdefault("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(self)")
         if path.startswith("/static/") or path in ("/sw.js", "/manifest.webmanifest"):
             h.setdefault("Cache-Control", "no-cache")  # всегда проверять свежую версию после деплоя
         else:

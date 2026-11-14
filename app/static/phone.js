@@ -26,6 +26,13 @@
     onConnection: (ok) => { if (!ok && openId) $("pcStatus").textContent = "нет связи с сервером…"; },
   });
 
+  // Нажали на баннер о новом сообщении: чат с компьютером открываем здесь же, чат с человеком — его страницей.
+  PD.alerts.open = (url) => {
+    const u = new URL(url, location.origin);
+    if (u.pathname === "/chat" && u.searchParams.get("c")) openChat(u.searchParams.get("c"));
+    else location.href = u.pathname + u.search;
+  };
+
   // ---------- экраны
   function showGate(title, text) {
     chat.stop();

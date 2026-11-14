@@ -34,6 +34,7 @@
     <nav class="menu" id="listMenu" hidden>
       <button type="button" id="installBtn" hidden>📲 Установить приложение</button>
       <button type="button" id="menuPush">🔔 Уведомления</button>
+      <button type="button" data-sound-toggle></button>
       <button type="button" id="menuUsers" hidden>👥 Пользователи</button>
       <button type="button" id="menuAccount" hidden></button>
     </nav>
@@ -148,7 +149,6 @@
       <button class="icon-btn" id="attachBtn" type="button" aria-label="Прикрепить файл">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.5 6v11.5a4 4 0 0 1-8 0V5a2.5 2.5 0 0 1 5 0v10.5a1 1 0 0 1-2 0V6H10v9.5a2.5 2.5 0 0 0 5 0V5a4 4 0 0 0-8 0v12.5a5.5 5.5 0 0 0 11 0V6h-1.5z"/></svg>
       </button>
-      <input type="file" id="fileInput" multiple hidden>
       <textarea id="msgInput" rows="1" placeholder="Сообщение" aria-label="Сообщение"></textarea>
       <button class="round-btn" id="actionBtn" type="button" aria-label="Записать голосовое">
         <svg class="i-mic" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>

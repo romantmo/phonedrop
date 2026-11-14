@@ -3,6 +3,9 @@
 // 2) Показывает push-уведомления, когда приложение закрыто.
 // Ничего не кэширует — данные всегда идут напрямую на сервер.
 
+// Safari (iPhone, iPad, Mac): там push обязан всегда показывать уведомление.
+const APPLE = /AppleWebKit/.test(self.navigator.userAgent) && !/Chrome|Chromium|CriOS|Android|Edg/.test(self.navigator.userAgent);
+
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
@@ -27,19 +30,27 @@ self.addEventListener("push", (event) => {
   } catch {
     data = {};
   }
+  const show = (extra = {}) =>
+    self.registration.showNotification(data.title || "PhoneDrop", {
+      body: data.body || "Новое сообщение",
+      tag: data.tag || "phonedrop",
+      renotify: true,  // новое сообщение в том же чате снова звенит, а не тихо заменяет старое
+      timestamp: Date.now(),
+      icon: "/static/icons/icon-192.png",
+      badge: "/static/icons/badge-96.png",
+      data: { url: data.url || "/" },
+      ...extra,
+    });
   event.waitUntil(
     (async () => {
-      // Если PhoneDrop сейчас открыт на экране — уведомление не нужно, сообщение и так видно.
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      if (windows.some((w) => w.visibilityState === "visible" && w.focused !== false)) return;
-      await self.registration.showNotification(data.title || "PhoneDrop", {
-        body: data.body || "Новое сообщение",
-        tag: data.tag || "phonedrop",
-        renotify: true,
-        icon: "/static/icons/icon-192.png",
-        badge: "/static/icons/badge-96.png",
-        data: { url: data.url || "/" },
-      });
+      const open = windows.filter((w) => w.visibilityState === "visible" && w.focused !== false);
+      if (!open.length) return show();
+      // PhoneDrop открыт на экране — пусть само приложение покажет баннер и сыграет звук.
+      for (const w of open) w.postMessage({ type: "pd-push", data: { ...data, system: APPLE } });
+      // iPhone/Safari отключает подписку, если push не показал уведомление (3 раза — и всё).
+      // Поэтому там показываем его всегда, но без звука — звук играет приложение.
+      if (APPLE) await show({ silent: true });
     })()
   );
 });

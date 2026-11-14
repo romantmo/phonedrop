@@ -1569,3 +1569,16 @@ def test_own_qr_scanner_is_served_for_iphone(client):
     """v1.9.1: свой распознаватель QR (для любого браузера) лежит на нашем сервере — CSP разрешает только свои скрипты."""
     r = client.get("/static/vendor/jsQR.min.js")
     assert r.status_code == 200 and "jsQR" in r.text[:200]
+
+
+def test_attach_menu_can_send_location(client):
+    """v1.10: плитка «📍 Место» спрашивает геолокацию — заголовок разрешает её только нашему сайту."""
+    policy = client.get("/").headers["Permissions-Policy"]
+    assert "geolocation=(self)" in policy and "camera=(self)" in policy
+
+
+def test_push_always_visible_on_iphone(client):
+    """v1.10: iPhone отключает push-подписку, если уведомление не показано. На Safari показываем всегда (тихо),
+    а открытому приложению передаём сообщение — оно само рисует баннер и играет звук."""
+    sw = client.get("/sw.js").text
+    assert "APPLE" in sw and "silent: true" in sw and "pd-push" in sw and "renotify: true" in sw

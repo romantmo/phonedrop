@@ -240,6 +240,14 @@
   // ---------- вкладки «Чаты | Инструменты»
   let section = "chat";
   let target = "phone";  // открытый чат: "phone" или id другого моего компьютера
+
+  // Push пришёл, пока вкладка открыта: сообщение от телефона «на экране», только если открыт чат с ним.
+  PD.alerts.isCurrent = (data) => !!state && data.tag === state.chat_id && target === "phone" && !$("chatsCard").hidden;
+  PD.alerts.open = (url, data) => {
+    if (state && data.tag === state.chat_id) selectChat("phone");
+    else if (url.startsWith("/room/")) window.open(url, "_blank", "noopener");
+    else PDPcChat.refresh();
+  };
   function showSection(name) {
     section = name;
     $("dropZone").hidden = name !== "chat" || target !== "phone";

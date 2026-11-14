@@ -364,11 +364,7 @@ window.PD = (() => {
         if (input.value.trim()) this.sendText();
         else this.startRecording();
       });
-      $("attachBtn").addEventListener("click", () => $("fileInput").click());
-      $("fileInput").addEventListener("change", (e) => {
-        this.sendFiles([...e.target.files]);
-        e.target.value = "";
-      });
+      $("attachBtn").addEventListener("click", () => this.openAttach());
       $("recCancel").addEventListener("click", () => this.stopRecording(false));
       $("recSend").addEventListener("click", () => this.stopRecording(true));
       this._resize = resize;
@@ -400,6 +396,121 @@ window.PD = (() => {
         e.preventDefault();
         this.sendFiles(files);
       });
+    }
+
+    // ------------------------------------------------ меню «Прикрепить»
+    // На телефоне — плитки (галерея, камера, файлы, место…). На компьютере — сразу выбор файла.
+    openAttach() {
+      if (!matchMedia("(pointer: coarse)").matches) return this.pick({ multiple: true });
+      const close = () => {
+        back.classList.remove("show");
+        document.removeEventListener("keydown", onKey);
+        setTimeout(() => back.remove(), 200);
+      };
+      const onKey = (e) => { if (e.key === "Escape") close(); };
+      const tile = (ico, label, sub, color, fn) =>
+        el("button", { type: "button", class: "at-tile " + color, onclick: () => { close(); fn(); } },
+          el("span", { class: "at-ico", "aria-hidden": "true" }, ico), el("b", {}, label), el("small", {}, sub));
+      const tiles = [
+        tile("🖼", "Галерея", "фото и видео", "c1", () => this.pick({ accept: "image/*,video/*", multiple: true })),
+        tile("📷", "Камера", "сделать фото", "c2", () => this.pick({ accept: "image/*", capture: "environment" })),
+        tile("🎥", "Видео", "снять видео", "c3", () => this.pick({ accept: "video/*", capture: "environment" })),
+        tile("📁", "Файлы", "Диск, Загрузки", "c4", () => this.pick({ multiple: true })),
+        tile("📍", "Место", "где я сейчас", "c5", () => this.sendLocation()),
+      ];
+      // Контакты из телефонной книги умеет отдавать только Chrome на Android.
+      if ("contacts" in navigator && "ContactsManager" in window) {
+        tiles.push(tile("👤", "Контакт", "из телефона", "c6", () => this.sendContact()));
+      }
+      if (navigator.clipboard && navigator.clipboard.read) {
+        tiles.push(tile("📋", "Вставить", "что скопировал", "c7", () => this.pasteClipboard()));
+      }
+      const back = el("div", { class: "at-back", onclick: (e) => { if (e.target === back) close(); } },
+        el("div", { class: "at-sheet", role: "dialog", "aria-label": "Прикрепить" },
+          el("div", { class: "at-grip" }),
+          el("div", { class: "at-grid" }, ...tiles)));
+      document.body.append(back);
+      document.addEventListener("keydown", onKey);
+      requestAnimationFrame(() => back.classList.add("show"));
+    }
+
+    // Системное окно выбора файла. capture="environment" сразу открывает заднюю камеру.
+    pick({ accept = null, capture = null, multiple = false }) {
+      const input = el("input", { type: "file", accept, capture, multiple, hidden: true });
+      const done = () => setTimeout(() => input.remove(), 0);
+      input.addEventListener("change", () => {
+        const files = [...input.files];
+        done();
+        if (files.length) this.sendFiles(files);
+      });
+      input.addEventListener("cancel", done);
+      document.body.append(input);
+      input.click();
+    }
+
+    // Отправляет готовый текст (место, контакт), не трогая то, что человек уже набирал.
+    async sendTextValue(text) {
+      const draft = this.input.value;
+      this.input.value = text;
+      await this.sendText();
+      this.input.value = draft;
+      this._resize();
+    }
+
+    sendLocation() {
+      if (!navigator.geolocation) return toast("Это устройство не умеет определять место", true);
+      toast("Определяю, где ты…");
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const { latitude, longitude, accuracy } = pos.coords;
+          const url = `https://maps.google.com/?q=${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+          this.sendTextValue(`📍 Я здесь (точность ~${Math.round(accuracy)} м)\n${url}`);
+        },
+        (err) => toast(err.code === 1
+          ? "Нет доступа к геолокации — разреши его для сайта в настройках"
+          : "Не получилось определить место, попробуй ещё раз", true),
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 },
+      );
+    }
+
+    async sendContact() {
+      try {
+        const supported = await navigator.contacts.getProperties();
+        const props = ["name", "tel", "email"].filter((p) => supported.includes(p));
+        const [c] = await navigator.contacts.select(props, { multiple: false });
+        if (!c) return;
+        const lines = ["👤 " + ((c.name && c.name[0]) || "Контакт")];
+        for (const tel of c.tel || []) lines.push("📞 " + tel);
+        for (const mail of c.email || []) lines.push("✉️ " + mail);
+        await this.sendTextValue(lines.join("\n"));
+      } catch {
+        toast("Не получилось открыть контакты", true);
+      }
+    }
+
+    // «Вставить»: картинка из буфера уходит файлом, текст попадает в поле — можно проверить перед отправкой.
+    async pasteClipboard() {
+      try {
+        const items = await navigator.clipboard.read();
+        const files = [];
+        let text = "";
+        for (const item of items) {
+          const type = item.types.find((t) => t.startsWith("image/"));
+          if (type) {
+            const blob = await item.getType(type);
+            files.push(new File([blob], `Вставка ${new Date().toLocaleTimeString("ru-RU").replace(/:/g, "-")}.${type.split("/")[1]}`, { type }));
+          } else if (item.types.includes("text/plain")) {
+            text += await (await item.getType("text/plain")).text();
+          }
+        }
+        if (files.length) return this.sendFiles(files);
+        if (!text.trim()) return toast("В буфере ничего нет");
+        this.input.value = this.input.value ? `${this.input.value} ${text}` : text;
+        this._resize();
+        this.input.focus();
+      } catch {
+        toast("Браузер не дал прочитать буфер — разреши доступ", true);
+      }
     }
 
     async sendText() {
@@ -577,9 +688,103 @@ window.PD = (() => {
         this.unread++;
         document.title = `(${this.unread}) PhoneDrop`;
       }
-      if (this.mobile && navigator.vibrate) navigator.vibrate(60);
+      alerts.soft();
     }
   }
+
+  // ------------------------------------------------ звук и баннер внутри приложения
+  // Когда приложение открыто, система уведомление не показывает — сообщаем сами:
+  // в открытом чате — тихий «тюк», в другом чате — баннер сверху и звук погромче.
+  const alerts = (() => {
+    let ctx = null;
+    let last = 0;
+    let lastKind = "";
+    const enabled = () => { try { return localStorage.getItem("pd-sound") !== "off"; } catch { return true; } };
+
+    // Браузер разрешает звук только после первого касания страницы.
+    function unlock() {
+      try {
+        ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+        if (ctx.state === "suspended") ctx.resume();
+      } catch { /* без звука */ }
+    }
+    for (const ev of ["pointerdown", "keydown"]) addEventListener(ev, unlock, { capture: true, passive: true });
+
+    function play(kind) {
+      if (!enabled() || document.hidden) return;
+      const now = Date.now();
+      if (now - last < 1200 && (kind === "soft" || lastKind === "alert")) return;  // не дребезжим
+      last = now;
+      lastKind = kind;
+      if (navigator.vibrate) { try { navigator.vibrate(kind === "soft" ? 40 : [90, 60, 90]); } catch { /* нет вибро */ } }
+      if (!ctx || ctx.state !== "running") return;
+      const notes = kind === "soft" ? [[880, 0, 0.09, 0.05]] : [[784, 0, 0.13, 0.11], [1175, 0.12, 0.26, 0.11]];
+      for (const [freq, start, end, vol] of notes) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const t = ctx.currentTime;
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, t + start);
+        gain.gain.exponentialRampToValueAtTime(vol, t + start + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + end);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t + start);
+        osc.stop(t + end + 0.02);
+      }
+    }
+
+    function banner(data) {
+      $("pdBanner")?.remove();
+      const node = el("button", { id: "pdBanner", class: "pd-banner", type: "button", onclick: () => {
+        node.remove();
+        api_.open(data.url || "/", data);
+      } },
+      el("img", { src: "/static/icons/icon-192.png", alt: "" }),
+      el("span", { class: "pd-banner-txt" }, el("b", {}, data.title || "PhoneDrop"), el("small", {}, data.body || "")));
+      document.body.append(node);
+      requestAnimationFrame(() => node.classList.add("show"));
+      setTimeout(() => { node.classList.remove("show"); setTimeout(() => node.remove(), 300); }, 5000);
+    }
+
+    const samePlace = (url) => {
+      const u = new URL(url || "/", location.origin);
+      return u.pathname + u.search === location.pathname + location.search;
+    };
+
+    const api_ = {
+      enabled,
+      set(on) { try { localStorage.setItem("pd-sound", on ? "on" : "off"); } catch { /* приватный режим */ } },
+      soft: () => play("soft"),
+      // Страница может уточнить, какой чат сейчас на экране и как открыть чат по нажатию на баннер.
+      isCurrent: (data) => samePlace(data.url),
+      open: (url) => { location.href = url; },
+      // Пришло от service worker: push по сообщению, пока приложение открыто.
+      handle(data) {
+        if (api_.isCurrent(data)) return play("soft");
+        if (!data.system) banner(data);  // на iPhone система уже показала своё уведомление
+        play("alert");
+      },
+    };
+    // Кнопки «🔊 Звук сообщений» в меню (на каждой странице свои, работают одинаково).
+    const label = () => (enabled() ? "🔊 Звук сообщений: включён" : "🔇 Звук сообщений: выключен");
+    for (const btn of document.querySelectorAll("[data-sound-toggle]")) {
+      btn.textContent = label();
+      btn.addEventListener("click", () => {
+        api_.set(!enabled());
+        document.querySelectorAll("[data-sound-toggle]").forEach((b) => (b.textContent = label()));
+        if (enabled()) { unlock(); setTimeout(() => play("alert"), 50); }
+        toast(enabled() ? "Звук включён" : "Звук выключен");
+      });
+    }
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", (e) => {
+        if (e.data && e.data.type === "pd-push") api_.handle(e.data.data || {});
+      });
+      if (navigator.serviceWorker.startMessages) navigator.serviceWorker.startMessages();
+    }
+    return api_;
+  })();
 
   // ------------------------------------------------ push-уведомления
   const push = {
@@ -632,5 +837,5 @@ window.PD = (() => {
     },
   };
 
-  return { $, el, toast, api, fmtSize, fmtTime, fmtDuration, dayLabel, copyText, Chat, push, canShareFiles, shareFiles, prefetchShare };
+  return { $, el, toast, api, fmtSize, fmtTime, fmtDuration, dayLabel, copyText, Chat, push, alerts, canShareFiles, shareFiles, prefetchShare };
 })();
