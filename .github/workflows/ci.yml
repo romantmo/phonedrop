@@ -13,6 +13,14 @@ on:
   push:
     branches: [main]   # каждый push в основную ветку
   pull_request:        # и каждый Pull Request (о них — позже)
+  schedule:
+    # Раз в неделю (понедельник, 05:17 по Израилю зимой) — пересобрать образ на свежей основе
+    # (обновления Python, LibreOffice, Linux) и обновить caddy/coturn/clamav на сервере.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:   # кнопка «Run workflow» — запустить вручную
+
+# Сторонние actions закреплены по полному номеру коммита (SHA), а не по тегу: тег можно
+# подменить, коммит — нет (аудит v2.5, №5). Обновлять их будет Dependabot.
 
 permissions:
   contents: read       # по умолчанию роботу можно только читать код
@@ -24,10 +32,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Скачать код проекта
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Установить Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
           cache: pip   # запомнить скачанные библиотеки — следующий запуск быстрее
@@ -54,18 +62,19 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - name: Скачать код проекта
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Подготовить сборщик Docker
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Собрать образ по Dockerfile
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           load: true                              # оставить образ здесь, чтобы проверить
           tags: phonedrop:check
           build-args: APP_VERSION=${{ github.sha }} # номер коммита станет версией
+          pull: true                              # всегда свежая основа (python:3.13-slim)
           cache-from: type=gha                    # запоминать слои — следующая сборка быстрее
           cache-to: type=gha,mode=max
 
@@ -100,15 +109,15 @@ jobs:
           "
 
       - name: Войти в хранилище образов GitHub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@v4
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}   # временный ключ, GitHub выдаёт его сам
 
       - name: Отправить образ в хранилище
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           docker tag phonedrop:check "$IMAGE:latest"
           docker tag phonedrop:check "$IMAGE:${{ github.sha }}"
@@ -119,7 +128,7 @@ jobs:
   deploy:
     name: Выкладка на сервер
     needs: docker      # только после успешной сборки образа
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

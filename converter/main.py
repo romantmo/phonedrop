@@ -14,6 +14,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import multiprocessing
+import os
 import shutil
 import tempfile
 import zipfile
@@ -28,6 +30,13 @@ from . import ops
 
 MB = 1024 * 1024
 MAX_INPUT = 300 * MB
+# Любая операция (PDF, фото, Word) работает в отдельном процессе и убивается через это время.
+# Так «вредный» файл с бесконечным циклом не займёт конвертер навсегда.
+CONVERT_TIMEOUT_SEC = float(os.getenv("CONVERT_TIMEOUT_SEC", "180"))
+# forkserver: новые процессы рождаются от «чистого» процесса-заготовки (без потоков сервера),
+# с уже загруженными библиотеками — это и безопасно, и быстро.
+_ctx = multiprocessing.get_context("forkserver")
+_ctx.set_forkserver_preload(["converter.ops"])
 
 app = FastAPI(title="PhoneDrop converter", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -109,6 +118,46 @@ def _run(op: str, inputs: list[tuple[Path, str]], form: dict, out_dir: Path) -> 
     raise HTTPException(404, "Неизвестная операция")
 
 
+def _child(conn, op, inputs, form, out_dir):
+    try:
+        conn.send(("ok", [str(p) for p in _run(op, inputs, form, out_dir)]))
+    except ops.ConvertError as exc:
+        conn.send(("error", str(exc)))
+    except HTTPException as exc:
+        conn.send(("http", (exc.status_code, exc.detail)))
+    except Exception as exc:  # noqa: BLE001 — сообщаем родителю, а не молча умираем
+        conn.send(("crash", type(exc).__name__))
+    finally:
+        conn.close()
+
+
+def _run_limited(op: str, inputs: list[tuple[Path, str]], form: dict, out_dir: Path) -> list[Path]:
+    """_run в отдельном процессе с тайм-аутом (вызывается из потока)."""
+    parent, child = _ctx.Pipe(duplex=False)
+    proc = _ctx.Process(target=_child, args=(child, op, inputs, form, out_dir), daemon=True)
+    proc.start()
+    child.close()
+    try:
+        if not parent.poll(CONVERT_TIMEOUT_SEC):
+            raise ops.ConvertError("Файл слишком сложный — не успели обработать")
+        try:
+            kind, value = parent.recv()
+        except EOFError:
+            raise ops.ConvertError("Не получилось обработать файл — он слишком тяжёлый или повреждён")
+    finally:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(5)
+        parent.close()
+    if kind == "ok":
+        return [Path(p) for p in value]
+    if kind == "error":
+        raise ops.ConvertError(value)
+    if kind == "http":
+        raise HTTPException(*value)
+    raise RuntimeError(f"converter crashed: {value}")
+
+
 @app.post("/convert/{op}")
 async def convert(op: str, request: Request):
     form = await request.form(max_files=MAX_INPUT // MB, max_fields=10)
@@ -121,7 +170,7 @@ async def convert(op: str, request: Request):
             (tmp_path / "out").mkdir()
             try:
                 inputs = await run_in_threadpool(_save, files, tmp_path / "in")
-                outputs = await run_in_threadpool(_run, op, inputs, options, tmp_path / "out")
+                outputs = await run_in_threadpool(_run_limited, op, inputs, options, tmp_path / "out")
             except ops.ConvertError as exc:
                 raise HTTPException(422, str(exc))
             buf = io.BytesIO()

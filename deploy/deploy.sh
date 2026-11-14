@@ -17,8 +17,26 @@ if [[ ! "$VERSION" =~ ^([0-9a-f]{40}|latest)$ ]]; then
   echo "Ошибка: неверная версия «$VERSION»" >&2
   exit 1
 fi
+# Робот (ключ из GitHub) может выкатить ТОЛЬКО последний коммит ветки main. Даже если ключ украдут,
+# им не выкатить старую версию или чужой коммит из форка (аудит v2.5, №2).
+# Вручную из своей SSH-сессии (/opt/phonedrop/deploy.sh <коммит>) откат по-прежнему работает.
+if [[ -z "${1:-}" && -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+  HEAD_MAIN="$(curl -fsSL -H "Accept: application/vnd.github.sha" \
+                "https://api.github.com/repos/$REPO/commits/main" || true)"
+  if [[ "$VERSION" != "$HEAD_MAIN" ]]; then
+    echo "Ошибка: $VERSION — не последний коммит main (${HEAD_MAIN:-GitHub не ответил}). Выкладка отменена." >&2
+    exit 1
+  fi
+fi
+
 REF="main"
 [[ "$VERSION" != "latest" ]] && REF="$VERSION"
+
+# Запоминаем, что работает сейчас: если новая версия не поднимется — вернём старую.
+PREV_IMAGE="$(docker inspect --format '{{.Config.Image}}' phonedrop-app-1 2>/dev/null || true)"
+PREV_TAG="${PREV_IMAGE##*:}"
+cp -f compose.yaml compose.yaml.prev 2>/dev/null || true
+cp -f Caddyfile Caddyfile.prev 2>/dev/null || true
 
 echo "==> 1/5 Скачиваю настройки сервера с GitHub (версия $REF)"
 for f in compose.yaml Caddyfile deploy.sh; do
@@ -59,4 +77,13 @@ done
 
 echo "Ошибка: новая версия не ответила за 60 секунд. Журнал приложения:" >&2
 docker compose logs --tail 50 app >&2
+# Откат: прежние настройки и прежняя версия приложения — сайт продолжает работать.
+if [[ "$PREV_TAG" =~ ^([0-9a-f]{40}|latest)$ && -f compose.yaml.prev ]]; then
+  echo "==> Возвращаю предыдущую версию: $PREV_TAG" >&2
+  cp -f compose.yaml.prev compose.yaml
+  [[ -f Caddyfile.prev ]] && cp -f Caddyfile.prev Caddyfile
+  APP_TAG="$PREV_TAG" docker compose up -d --remove-orphans >&2 || true
+  [[ "$PREV_TAG" != "latest" ]] && docker tag "ghcr.io/$REPO:$PREV_TAG" "ghcr.io/$REPO:latest" || true
+  docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 || true
+fi
 exit 1

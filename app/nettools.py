@@ -71,11 +71,49 @@ def clean_host(raw) -> str:
     return text
 
 
+# v2.5 (аудит): сети самого сервера (его публичный IP) — заполняются при запуске приложения.
+BLOCKED_NETS: list = []
+# IPv6, внутри которых «спрятан» IPv4 (NAT64, старый формат): проверяем вложенный IPv4.
+_EMBED_V4 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("::/96"))
+
+
 def is_public(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
-        addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        elif any(addr in net for net in _EMBED_V4):
+            addr = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+        elif addr in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False
+    if any(addr.version == net.version and addr in net for net in BLOCKED_NETS):
+        return False
     return addr.is_global and not addr.is_multicast
+
+
+async def own_networks(public_url: str, extra: tuple = ()) -> list:
+    """Публичные адреса сервера (по имени сайта) + адреса из NET_BLOCK_IPS."""
+    nets = []
+    host = urlsplit(public_url).hostname or ""
+    if host:
+        try:
+            infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, None), 5)
+            nets += [ipaddress.ip_network(i[4][0]) for i in infos]
+        except (OSError, asyncio.TimeoutError, UnicodeError, ValueError):
+            pass
+    for item in extra:
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            pass
+    return list(dict.fromkeys(nets))
+
+
+def strip_url(url: str) -> str:
+    """Адрес без ?параметров, #якоря и логина — в них бывают токены (например, сброса пароля)."""
+    parts = urlsplit(url)
+    host = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, host, parts.path or "/", "", ""))
 
 
 async def public_ips(host: str, allow_private: bool = False) -> list[str]:
@@ -154,6 +192,8 @@ async def dns_report(domain: str, resolve=default_resolve) -> dict:
         raise NetError(T("Здесь нужен домен, а не IP-адрес"))
     except ValueError:
         pass
+    if "." not in domain:   # имена без точки — это внутренние имена (контейнеры), их не показываем
+        raise NetError(T("Введи имя (например, example.com) или IP-адрес"))
     types = DNS_TYPES
     results = await asyncio.gather(*(resolve(domain, t) for t in types))
     records = {t: r for t, r in zip(types, results) if r}
@@ -727,7 +767,7 @@ async def vt_lookup(kind: str, ident: str, key: str, transport=None) -> dict:
 async def vt_submit_url(url: str, key: str, transport=None) -> bool:
     try:
         async with httpx.AsyncClient(transport=transport, timeout=15) as client:
-            r = await client.post(f"{VT_API}/urls", headers={"x-apikey": key}, data={"url": url})
+            r = await client.post(f"{VT_API}/urls", headers={"x-apikey": key}, data={"url": strip_url(url)})
     except httpx.HTTPError:
         return False
     return r.status_code == 200
@@ -797,7 +837,7 @@ async def url_report(raw, allow_private: bool = False, rdap_transport=None, vt_k
         checks.append(_check("warn", T("Домену меньше полугода ({days} дн.)", days=age)))
     vt = None
     if vt_key:
-        vt = await vt_lookup("urls", final, vt_key, vt_transport) if vt_allowed() else {
+        vt = await vt_lookup("urls", strip_url(final), vt_key, vt_transport) if vt_allowed() else {
             "error": T("VirusTotal: можно 4 проверки в минуту — попробуй через минуту")}
         checks += vt_checks(vt, T("эту ссылку"))
     if not any(c["status"] in ("bad", "warn") for c in checks):

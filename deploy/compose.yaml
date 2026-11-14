@@ -12,6 +12,14 @@
 #   clamav    — антивирус ClamAV для «Проверки письма» (v2.4). Видит только приложение,
 #               в интернет ходит только за обновлениями баз.
 
+# Журналы контейнеров: не больше 5 файлов по 10 МБ на контейнер (иначе растут без конца,
+# а в них бывают одноразовые коды из адресов).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   app:
     # Версию (номер коммита) подставляет deploy.sh. Вручную без неё — последняя версия.
@@ -20,6 +28,11 @@ services:
     environment:
       PUBLIC_URL: https://drop.rbgen.com # адрес сайта для QR-кода и входа через Google
       VAPID_SUBJECT: https://drop.rbgen.com
+      # Без входа через Google (GOOGLE_* и ALLOWED_EMAILS в .env) приложение НЕ запустится —
+      # чтобы случайно не открыть регистрацию всем (аудит v2.5, №1).
+      REQUIRE_LOGIN: "1"
+      # Адреса самого сервера: сетевые проверки не ходят на него в обход файрвола (аудит №11).
+      NET_BLOCK_IPS: "2.31.111.188,2a01:4f8:c016:cbfb::/64"
     # Секреты (ключ входа через Google, список разрешённых email) лежат ТОЛЬКО на сервере
     # в файле /opt/phonedrop/.env (права 600). В GitHub и в коде их нет.
     env_file:
@@ -37,6 +50,9 @@ services:
       - av                               # сеть до антивируса
     depends_on:
       - converter
+    mem_limit: 1g                        # даже при сбое приложение не съест память всего сервера
+    pids_limit: 512
+    logging: *logging
     # Порт наружу НЕ открываем: снаружи приложение доступно только через Caddy.
 
   converter:
@@ -57,6 +73,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    logging: *logging
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
       interval: 30s
@@ -75,7 +92,8 @@ services:
       CLAMD_CONF_StreamMaxLength: "30M"  # письмо до 25 МБ + запас
     volumes:
       - clamav-db:/var/lib/clamav        # базы сохраняются между перезапусками (не качать заново)
-    mem_limit: 2g                        # обычно ClamAV занимает ~1,2–1,5 ГБ
+    mem_limit: 2g                        # обычно ClamAV занимает ~1–1,5 ГБ
+    logging: *logging
     security_opt:
       - no-new-privileges:true
     # Порт 3310 наружу НЕ открываем: проверять файлы может только приложение.
@@ -92,6 +110,10 @@ services:
       - caddy-config:/config
     depends_on:
       - app
+    mem_limit: 256m
+    logging: *logging
+    security_opt:
+      - no-new-privileges:true
 
   turn:
     image: coturn/coturn:4-alpine        # официальный образ; работает от пользователя nobody
@@ -99,6 +121,7 @@ services:
     # Сеть сервера напрямую: coturn нужен диапазон портов, Docker с ним работает плохо.
     # Порты в файрволе Hetzner: 3478 TCP+UDP и 49160-49200 UDP.
     network_mode: host
+    logging: *logging
     env_file:
       - path: .env                       # TURN_SECRET — общий секрет с приложением (только на сервере)
         required: false
@@ -125,7 +148,7 @@ services:
           --use-auth-secret --static-auth-secret="$$TURN_SECRET" --realm=drop.rbgen.com \
           --fingerprint --no-software-attribute --stale-nonce=600 \
           --user-quota=12 --total-quota=100 --max-bps=3000000 \
-          --no-multicast-peers \
+          --no-multicast-peers --no-tcp-relay \
           --denied-peer-ip=0.0.0.0-0.255.255.255 \
           --denied-peer-ip=10.0.0.0-10.255.255.255 \
           --denied-peer-ip=100.64.0.0-100.127.255.255 \
@@ -142,6 +165,8 @@ services:
           --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff \
           --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
         # denied-peer-ip: через TURN нельзя достучаться до внутренних адресов сервера и сетей Docker.
+        # --no-tcp-relay: TURN не открывает TCP-соединения к чужим серверам (звонкам он не нужен:
+        # звук и видео идут по UDP) — иначе сервер можно использовать как прокси (аудит №3).
         # DTLS в новом coturn по умолчанию выключен (включается только опцией --dtls),
         # опции --no-dtls больше нет — с ней coturn не запускается.
 

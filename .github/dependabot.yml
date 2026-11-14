@@ -1,0 +1,17 @@
+# Dependabot — робот GitHub, который раз в неделю проверяет новые версии библиотек,
+# actions и Docker-образов и сам предлагает обновление (Pull Request). Мы смотрим, что прошли
+# автотесты, и нажимаем Merge — дальше всё выкатывает CI/CD.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule: {interval: weekly}

@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 import time
 import uuid
@@ -66,6 +67,9 @@ PHONE_COOKIE_DAYS = 365
 ROOM_INVITE_HOURS = 24   # одноразовый код приглашения в чат действует сутки
 MAX_ROOMS = 50
 MAX_VOICE_MB = 50
+CONVERTED_MAX = 1024 * MB     # результат конвертации — не больше 1 ГБ
+PUSH_HOSTS = ("fcm.googleapis.com", "android.googleapis.com", "push.services.mozilla.com",
+              "push.apple.com", "notify.windows.com")
 
 # Что можно показывать прямо в браузере. Всё остальное (html, svg, exe...) — только скачивание.
 INLINE_SAFE_PREFIXES = ("video/", "audio/")
@@ -341,6 +345,16 @@ class Settings:
     clamav_host: str = field(default_factory=lambda: os.getenv("CLAMAV_HOST", "clamav"))
     clamav_port: int = field(default_factory=lambda: _env_int("CLAMAV_PORT", 3310))
     mail_max_mb: int = field(default_factory=lambda: _env_int("MAIL_MAX_MB", 25))
+    # v2.5 (аудит): на сервере REQUIRE_LOGIN=1 — без входа через Google приложение НЕ запускается,
+    # а не открывает регистрацию всем (если ключи Google вдруг пропадут из .env).
+    require_login: bool = field(default_factory=lambda: os.getenv("REQUIRE_LOGIN", "") == "1")
+    # Push-уведомления отправляем только настоящим push-сервисам браузеров (иначе сервер можно
+    # заставить слать запросы куда угодно).
+    push_hosts: tuple = field(default_factory=lambda: tuple(
+        h.strip().lower() for h in os.getenv("PUSH_HOSTS", ",".join(PUSH_HOSTS)).split(",") if h.strip()))
+    # Адреса самого сервера: сетевые инструменты не должны ходить на него в обход файрвола Hetzner.
+    net_block: tuple = field(default_factory=lambda: tuple(
+        x.strip() for x in os.getenv("NET_BLOCK_IPS", "").split(",") if x.strip()))
 
     @property
     def google_enabled(self) -> bool:
@@ -349,7 +363,7 @@ class Settings:
     @property
     def login_required(self) -> bool:
         # Как только включён вход через Google, новые телефоны без него аккаунт не получают.
-        return self.google_enabled
+        return self.google_enabled or self.require_login
 
 
 class PushGone(Exception):
@@ -1090,12 +1104,16 @@ def client_ip(request: Request) -> str:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
+    if settings.require_login and not (settings.google_enabled and settings.allowed_emails):
+        # «Закрытый» отказ: лучше сайт не запустится (деплой покажет ошибку), чем откроется всем.
+        raise RuntimeError("REQUIRE_LOGIN=1 but GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / ALLOWED_EMAILS are not set in .env")
     store = Store(settings)
     limiter = RateLimiter()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.open()
+        nettools.BLOCKED_NETS[:] = await nettools.own_networks(settings.public_url, settings.net_block)
 
         async def cleanup_loop():
             while True:
@@ -1397,10 +1415,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 names = sorted(zf.namelist())
                 if len(names) > 200:
                     raise HTTPException(502, "Слишком много файлов в результате")
+                total = 0
                 for i, member in enumerate(names):
                     dest = out_dir / f"out-{i:03d}"  # своё имя — никаких путей из архива
                     with zf.open(member) as src, dest.open("wb") as out:
-                        shutil.copyfileobj(src, out)
+                        while chunk := src.read(MB):
+                            total += len(chunk)
+                            if total > CONVERTED_MAX:   # «бомба» в ответе не заполнит диск и память
+                                raise HTTPException(502, "Конвертер вернул слишком большой результат")
+                            out.write(chunk)
                     outs.append(dest)
             return outs
 
@@ -2912,6 +2935,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             p256dh, auth = body["keys"]["p256dh"], body["keys"]["auth"]
         except (KeyError, TypeError):
             raise HTTPException(400, "Неверная подписка")
+        host = (urlsplit(endpoint).hostname or "").lower() if isinstance(endpoint, str) else ""
+        if not any(host == h or host.endswith("." + h) for h in settings.push_hosts):
+            raise HTTPException(400, "Неверная подписка")
         if not (isinstance(endpoint, str) and endpoint.startswith("https://") and len(endpoint) < 1024
                 and isinstance(p256dh, str) and len(p256dh) < 200 and isinstance(auth, str) and len(auth) < 100):
             raise HTTPException(400, "Неверная подписка")
@@ -2995,10 +3021,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         origin = None
         host = urlsplit(settings.public_url).hostname or ""
         try:
-            ips = await nettools.public_ips(nettools.clean_host(host))
-            info = await nettools.rdap(ips[0], store.net_transport)
-            origin = {"ip": ips[0], "country": info.get("country")}
-        except (nettools.NetError, ValueError):
+            infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, None, family=socket.AF_INET), 5)
+            ip = infos[0][4][0]
+            info = await nettools.rdap(ip, store.net_transport)
+            origin = {"ip": ip, "country": info.get("country")}
+        except (nettools.NetError, ValueError, OSError, IndexError, asyncio.TimeoutError):
             origin = None
         store.net_origin = (time.time() + (DAY if origin else 600), origin)
         return origin
@@ -3075,7 +3102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Проверка письма: файл .eml или .msg. Письмо нигде не сохраняется — только разбирается в памяти."""
         who = net_user(request)
         limiter.hit(f"net-mail:{who}", 20, 600)
-        form = await request.form()
+        form = await read_form(request, settings.mail_max_mb + 1)   # лимит уже при приёме, а не после
         upload = form.get("file")
         if not isinstance(upload, UploadFile):
             raise HTTPException(400, "Выбери файл письма (.eml или .msg)")
