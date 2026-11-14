@@ -22,7 +22,7 @@ def fields(text: str) -> set[str]:
 def server_phrases() -> set[str]:
     """Все русские строки из app/main.py и app/nettools.py, кроме комментариев, docstring'ов и SQL."""
     found = set()
-    for name in ("main.py", "nettools.py"):
+    for name in ("main.py", "nettools.py", "mailcheck.py"):
         found |= file_phrases(ROOT / "app" / name)
     return found
 

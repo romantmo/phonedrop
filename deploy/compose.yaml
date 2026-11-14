@@ -9,6 +9,8 @@
 #               HTTPS-сертификат (замочек) и передаёт запросы приложению;
 #   turn      — TURN-сервер для звонков (coturn): пересылает звук и видео, когда телефоны
 #               не могут соединиться напрямую. Разговор зашифрован, coturn его не видит.
+#   clamav    — антивирус ClamAV для «Проверки письма» (v2.4). Видит только приложение,
+#               в интернет ходит только за обновлениями баз.
 
 services:
   app:
@@ -32,6 +34,7 @@ services:
     networks:
       - default                          # сеть с Caddy и интернетом (нужен для push-уведомлений)
       - convert                          # внутренняя сеть до конвертера
+      - av                               # сеть до антивируса
     depends_on:
       - converter
     # Порт наружу НЕ открываем: снаружи приложение доступно только через Caddy.
@@ -59,6 +62,23 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  clamav:
+    image: clamav/clamav:1.5             # официальный образ Cisco Talos; базы обновляет сам (freshclam)
+    restart: unless-stopped
+    networks:
+      - av                               # только приложение + интернет для обновления баз (Caddy его не видит)
+    environment:
+      # Память: при обновлении баз не держать две копии сразу (иначе на 4 ГБ сервере тесно).
+      CLAMD_CONF_ConcurrentDatabaseReload: "no"
+      FRESHCLAM_CONF_TestDatabases: "no"
+      CLAMD_CONF_StreamMaxLength: "30M"  # письмо до 25 МБ + запас
+    volumes:
+      - clamav-db:/var/lib/clamav        # базы сохраняются между перезапусками (не качать заново)
+    mem_limit: 2g                        # обычно ClamAV занимает ~1,2–1,5 ГБ
+    security_opt:
+      - no-new-privileges:true
+    # Порт 3310 наружу НЕ открываем: проверять файлы может только приложение.
 
   caddy:
     image: caddy:2
@@ -128,8 +148,10 @@ services:
 networks:
   convert:
     internal: true                       # из этой сети нет выхода в интернет
+  av: {}                                 # приложение ↔ антивирус
 
 volumes:
+  clamav-db:
   phonedrop-data:
   caddy-data:
   caddy-config:

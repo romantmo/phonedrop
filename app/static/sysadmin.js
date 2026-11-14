@@ -77,6 +77,10 @@ window.PDSysTools = (() => {
     return go;
   }
 
+  // Код страны → флаг: «DE» → 🇩🇪
+  const flagOf = (cc) => (/^[A-Z]{2}$/.test(cc || "")
+    ? String.fromCodePoint(...[...cc].map((c) => 0x1F1E6 + c.charCodeAt(0) - 65)) + " " + cc : "");
+
   const fmtDate = (iso) => {
     if (!iso) return "";
     const d = new Date(iso);
@@ -146,10 +150,14 @@ window.PDSysTools = (() => {
       button: tx("Проверить порты"),
       run: async () => {
         const r = await post("/api/net/ports", { host: host.value, ports: ports.value });
+        const filtered = r.ports.some((p) => p.state === "filtered");
+        const from = r.from ? tx("Проверка идёт с сервера {0} {1}", r.from.ip, flagOf(r.from.country)) : null;
         return [el("h3", { dir: "ltr" }, r.host === r.ip ? r.ip : `${r.host} · ${r.ip}`),
           checks(r.ports.map((p) => ({ status: STATE[p.state][0],
             text: `${p.port} — ${STATE[p.state][1]}${p.ms !== undefined ? ` · ${p.ms} ms` : ""}` }))),
-          el("p", { class: "tool-note" }, tx("«Нет ответа» обычно значит, что порт закрыт файрволом и пакеты просто отбрасываются."))];
+          from ? el("p", { class: "tool-note", dir: "auto" }, from) : null,
+          filtered ? el("p", { class: "tool-note" }, tx("«Нет ответа» обычно значит, что порт закрыт файрволом и пакеты просто отбрасываются. Если на файрволе разрешены только некоторые страны (например, только Израиль), проверка из другой страны тоже покажет «нет ответа».")) : null,
+        ].filter(Boolean);
       },
     });
   }
@@ -628,6 +636,213 @@ window.PDSysTools = (() => {
     loadMine();
   }
 
+
+  // ================================================================ скорость интернета
+  // Замер до ближайшего узла Cloudflare (движок speed.cloudflare.com, MIT) — в Израиле это узел в Израиле.
+  // Итоги замера Cloudflare не отправляем (logAimApiUrl: null). Объём — до ~200 МБ на быстром интернете.
+  const SPEED_STEPS = [
+    { type: "latency", numPackets: 1 },
+    { type: "download", bytes: 1e5, count: 1, bypassMinDuration: true },
+    { type: "latency", numPackets: 20 },
+    { type: "download", bytes: 1e5, count: 9 },
+    { type: "download", bytes: 1e6, count: 8 },
+    { type: "upload", bytes: 1e5, count: 8 },
+    { type: "upload", bytes: 1e6, count: 6 },
+    { type: "download", bytes: 1e7, count: 6 },
+    { type: "upload", bytes: 1e7, count: 4 },
+    { type: "download", bytes: 25e6, count: 4 },
+  ];
+  const mbps = (bps) => (bps ? (bps / 1e6).toFixed(bps < 1e7 ? 1 : 0) : "—");
+  const ms = (v) => (v || v === 0 ? Math.round(v) : "—");
+
+  function renderSpeed(box) {
+    const tile = (icon, label) => {
+      const value = el("b", { class: "sp-value", dir: "ltr" }, "—");
+      return { node: el("div", { class: "sp-tile" }, el("span", { class: "sp-label" }, `${icon} ${label}`), value), value };
+    };
+    const down = tile("⬇️", tx("Загрузка, Мбит/с"));
+    const up = tile("⬆️", tx("Отдача, Мбит/с"));
+    const ping = tile("📶", tx("Пинг, мс"));
+    const jitter = tile("〰️", tx("Джиттер, мс"));
+    const status = el("p", { class: "sys-wait" });
+    const extra = el("div", { class: "sys-out" });
+    const btn = el("button", { class: "btn primary block", type: "button" }, tx("▶️ Начать замер"));
+    let engine = null;
+
+    function show(sum, final) {
+      down.value.textContent = mbps(sum.download);
+      up.value.textContent = mbps(sum.upload);
+      ping.value.textContent = ms(sum.latency);
+      jitter.value.textContent = ms(sum.jitter);
+      if (!final) return;
+      const rows = [
+        [tx("Пинг при загрузке"), sum.downLoadedLatency ? `${ms(sum.downLoadedLatency)} ms` : null],
+        [tx("Пинг при отдаче"), sum.upLoadedLatency ? `${ms(sum.upLoadedLatency)} ms` : null],
+      ];
+      const loaded = Math.max(sum.downLoadedLatency || 0, sum.upLoadedLatency || 0);
+      const note = loaded && sum.latency && loaded - sum.latency > 100
+        ? checks([{ status: "warn", text: tx("Под нагрузкой пинг сильно растёт — звонки и игры будут подтормаживать, пока кто-то качает") }])
+        : null;
+      extra.replaceChildren(...[kv(rows), note].filter(Boolean));
+    }
+
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      extra.replaceChildren();
+      status.textContent = tx("Идёт замер…");
+      let SpeedTest;
+      try {
+        ({ default: SpeedTest } = await import("/static/vendor/cf-speedtest.js"));
+      } catch {
+        status.textContent = tx("Не получилось загрузить замер скорости");
+        btn.disabled = false;
+        return;
+      }
+      engine = new SpeedTest({ autoStart: false, logAimApiUrl: null, measurements: SPEED_STEPS });
+      engine.onResultsChange = () => {
+        if (!box.isConnected) { engine.pause(); return; }  // ушли с экрана — не тратим трафик
+        show(engine.results.getSummary(), false);
+      };
+      engine.onFinish = (results) => {
+        status.textContent = tx("Готово");
+        show(results.getSummary(), true);
+        btn.disabled = false;
+        btn.textContent = tx("🔄 Ещё раз");
+      };
+      engine.onError = () => {
+        status.textContent = tx("Замер прервался — проверь интернет и попробуй ещё раз");
+        btn.disabled = false;
+      };
+      engine.play();
+    });
+
+    box.replaceChildren(el("div", { class: "sp-grid" }, down.node, up.node, ping.node, jitter.node), status, btn, extra,
+      el("p", { class: "tool-note" }, tx("Замер до ближайшего сервера Cloudflare (обычно в Израиле), как на speed.cloudflare.com. Тратит до ~200 МБ трафика — на мобильном интернете лучше через Wi-Fi.")));
+  }
+
+  // ================================================================ проверка ссылки
+  function urlResult(r) {
+    const nodes = [el("h3", { dir: "ltr" }, r.domain || r.final), checks(r.checks)];
+    if (r.chain.length > 1) {
+      nodes.push(el("h4", {}, tx("Куда ведёт ссылка")), el("ol", { class: "sys-hops" }, ...r.chain.map((h) =>
+        el("li", { class: h.blocked ? "slow" : "" }, el("div", { dir: "ltr" }, h.url),
+          el("div", { class: "sys-hop-meta" }, h.blocked ? tx("остановлено") : h.status ? `HTTP ${h.status}` : tx("нет ответа"))))));
+    }
+    nodes.push(kv([
+      [tx("Итоговый адрес"), r.final !== r.url ? r.final : null],
+      [tx("Заголовок страницы"), r.title],
+      [tx("Домен зарегистрирован"), r.registered ? `${fmtDate(r.registered)}${r.age_days !== null ? ` (${tx("{0} дн.", r.age_days)})` : ""}` : null],
+    ]));
+    if (r.vt && r.vt.found === false) {
+      const send = el("button", { class: "btn", type: "button" }, tx("Отправить ссылку в VirusTotal"));
+      send.addEventListener("click", async () => {
+        send.disabled = true;
+        try {
+          await post("/api/net/url/vt-submit", { url: r.final });
+          toast(tx("Отправлено. Проверь ссылку ещё раз через минуту"));
+        } catch (e) {
+          toast(e.message, true);
+          send.disabled = false;
+        }
+      });
+      nodes.push(send, el("p", { class: "tool-note" }, tx("Ссылка станет видна в базе VirusTotal. Не отправляй ссылки с личными данными (например, с токеном сброса пароля).")));
+    }
+    return nodes;
+  }
+
+  function renderUrl(box, preset) {
+    const url = input({ placeholder: "https://…", inputmode: "url" });
+    if (preset) url.value = preset;
+    const go = form(box, {
+      fields: [labeled(tx("Ссылка"), url)],
+      button: tx("Проверить ссылку"),
+      run: async () => urlResult(await post("/api/net/url", { url: url.value })),
+    });
+    box.append(el("p", { class: "tool-note" }, tx("Сервер только смотрит, куда ведёт ссылка, и ничего на странице не запускает. Если предупреждений нет, это ещё не гарантия безопасности.")));
+    if (preset) go();
+  }
+
+  // ================================================================ проверка письма
+  const fmtSize = (n) => PD.fmtSize(n);
+  const AV = {
+    clean: ["ok", tx("Антивирус ClamAV: угроз не найдено")],
+    unavailable: ["info", tx("Антивирус сейчас недоступен (например, обновляет базы) — вложения проверены только по признакам")],
+  };
+
+  function mailResult(r) {
+    const nodes = [el("h3", { dir: "auto" }, r.subject || tx("(без темы)"))];
+    if (r.from) nodes.push(el("p", { class: "tool-note", dir: "auto" }, r.from));
+    const summary = [];
+    if (r.av.status === "found") summary.push({ status: "bad", text: tx("Антивирус нашёл угрозу в письме: {0}", r.av.name) });
+    else if (AV[r.av.status]) summary.push({ status: AV[r.av.status][0], text: AV[r.av.status][1] });
+    else summary.push({ status: "info", text: r.av.text || tx("Антивирус не смог проверить файл") });
+    const badAtt = r.attachments.filter((a) => a.flags.some((f) => f.status === "bad")).length;
+    const badLinks = r.links.filter((l) => l.flags.some((f) => f.status === "bad")).length;
+    if (badAtt) summary.push({ status: "bad", text: tx("Опасных вложений: {0}", badAtt) });
+    if (badLinks) summary.push({ status: "bad", text: tx("Подозрительных ссылок: {0}", badLinks) });
+    if (!r.vt) summary.push({ status: "info", text: tx("VirusTotal не подключён — вложения проверены антивирусом и по признакам") });
+    nodes.push(checks(summary));
+
+    if (r.attachments.length) {
+      nodes.push(el("h4", {}, tx("Вложения: {0}", r.attachments.length)));
+      for (const a of r.attachments) {
+        const list = a.flags.length ? a.flags : [{ status: "ok", text: tx("Явных признаков опасности нет") }];
+        nodes.push(el("div", { class: "sys-att" },
+          el("div", { class: "sys-att-head" }, el("b", { dir: "auto" }, a.name), el("span", {}, fmtSize(a.size))),
+          checks(list), copyRow(a.sha256, `SHA-256: ${a.sha256}`)));
+      }
+    }
+    if (r.links.length) {
+      nodes.push(el("h4", {}, tx("Ссылки: {0}", r.links.length)));
+      for (const l of r.links) {
+        const res = el("div", { class: "sys-out" });
+        const check = el("button", { class: "chip", type: "button" }, tx("🔗 Проверить"));
+        check.addEventListener("click", async () => {
+          check.disabled = true;
+          res.replaceChildren(el("p", { class: "sys-wait" }, tx("Проверяю…")));
+          try {
+            res.replaceChildren(...urlResult(await post("/api/net/url", { url: l.url })));
+          } catch (e) {
+            res.replaceChildren(el("p", { class: "sys-error" }, e.message));
+          }
+          check.disabled = false;
+        });
+        nodes.push(el("div", { class: "sys-att" },
+          el("div", { class: "sys-link", dir: "ltr" }, l.url),
+          l.text && l.text !== l.url ? el("div", { class: "sys-hop-meta", dir: "auto" }, tx("Текст: {0}", l.text)) : null,
+          l.flags.length ? checks(l.flags) : null, check, res));
+      }
+    }
+    if (r.headers) nodes.push(el("h4", {}, tx("Заголовки")), ...analyzeHeaders(r.headers));
+    return nodes;
+  }
+
+  function renderMail(box) {
+    const pick = el("input", { type: "file", accept: ".eml,.msg,message/rfc822,application/vnd.ms-outlook", hidden: true });
+    const out = el("div", { class: "sys-out", "aria-live": "polite" });
+    const btn = el("button", { class: "btn primary block", type: "button", onclick: () => pick.click() }, tx("📂 Выбрать письмо (.eml или .msg)"));
+    async function check(file) {
+      if (!file) return;
+      btn.disabled = true;
+      out.replaceChildren(el("p", { class: "sys-wait" }, tx("Проверяю письмо «{0}»…", file.name)));
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        out.replaceChildren(...mailResult(await api(ROLE, "/api/net/mail", { method: "POST", body: fd })));
+      } catch (e) {
+        out.replaceChildren(el("p", { class: "sys-error" }, e.message));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    pick.addEventListener("change", () => { check(pick.files[0]); pick.value = ""; });
+    box.addEventListener("dragover", (e) => e.preventDefault());
+    box.addEventListener("drop", (e) => { e.preventDefault(); check(e.dataTransfer.files[0]); });
+    box.replaceChildren(el("div", { class: "sys-form" },
+      el("p", { class: "tool-note" }, tx("Outlook на компьютере: перетащи письмо из списка на рабочий стол — получится файл .msg. Outlook в браузере: ⋯ → «Сохранить» / «Скачать» (.eml). Gmail: ⋮ → «Скачать сообщение». Письмо проверяется на твоём сервере и нигде не сохраняется.")),
+      btn, pick), out);
+  }
+
   // ================================================================ список
   const TOOLS = [
     { id: "dns", icon: "🌐", title: tx("DNS и почта домена"), sub: "MX · SPF · DKIM · DMARC",
@@ -642,6 +857,15 @@ window.PDSysTools = (() => {
     { id: "myip", icon: "📍", title: tx("Мой IP и WHOIS"), sub: tx("Внешний адрес, владелец домена"),
       hint: tx("Твой внешний IP-адрес и кому принадлежит домен или IP: регистратор, срок оплаты, провайдер."),
       render: renderMyIp },
+    { id: "url", icon: "🔗", title: tx("Проверка ссылки"), sub: tx("Куда ведёт, фишинг, VirusTotal"),
+      hint: tx("Вставь подозрительную ссылку из письма или сообщения: увидишь, куда она на самом деле ведёт и что о ней известно."),
+      render: (box) => renderUrl(box) },
+    { id: "mail", icon: "🛡", title: tx("Проверка письма"), sub: tx("Вложения, ссылки, антивирус"),
+      hint: tx("Загрузи подозрительное письмо: антивирус проверит вложения, а ссылки и заголовки — на признаки фишинга."),
+      render: renderMail },
+    { id: "speed", icon: "⚡", title: tx("Скорость интернета"), sub: tx("Загрузка, отдача, пинг"),
+      hint: tx("Замер скорости интернета на этом устройстве."),
+      render: renderSpeed },
     { id: "secret", icon: "🔑", title: tx("Одноразовая ссылка"), sub: tx("Передать пароль безопасно"),
       hint: tx("Пароль не останется в переписке: ссылка открывается один раз и исчезает."),
       render: renderSecret },

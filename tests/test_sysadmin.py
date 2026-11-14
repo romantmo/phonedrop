@@ -4,9 +4,14 @@ import asyncio
 import base64
 import datetime
 import os
+import email.message
+import io
 import socket
+import socketserver
 import ssl
 import threading
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -16,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 
-from app import nettools
+from app import mailcheck, nettools
 from app.main import Settings, create_app
 from test_app import BASE, Device, Pusher, join, new_room, pair, store
 
@@ -41,10 +46,45 @@ async def fake_resolve(name, rdtype):
     return ZONE.get((name, rdtype), [])
 
 
+class FakeClamd(socketserver.ThreadingTCPServer):
+    """Как ClamAV: протокол INSTREAM. «Вирус» — всё, где встречается слово EICAR."""
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self):
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                f = self.request.makefile("rb")
+                assert f.read(10) == b"zINSTREAM\0"
+                data = b""
+                while True:
+                    size = int.from_bytes(f.read(4), "big")
+                    if not size:
+                        break
+                    data += f.read(size)
+                self.server.scanned.append(data)
+                reply = b"stream: Eicar-Test-Signature FOUND\0" if b"EICAR" in data else b"stream: OK\0"
+                self.request.sendall(reply)
+
+        super().__init__(("127.0.0.1", 0), Handler)
+        self.scanned = []
+
+
 @pytest.fixture
-def net_settings(tmp_path):
+def clamd():
+    srv = FakeClamd()
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv
+    srv.shutdown()
+    srv.server_close()
+
+
+@pytest.fixture
+def net_settings(tmp_path, clamd):
     return Settings(data_dir=tmp_path, public_url=BASE, min_free_disk_mb=0, devices_per_ip=1000,
-                    sends_per_min=1000, cleanup_interval_sec=3600, net_allow_private=True)
+                    sends_per_min=1000, cleanup_interval_sec=3600, net_allow_private=True,
+                    vt_api_key="test-key", clamav_host="127.0.0.1", clamav_port=clamd.server_address[1],
+                    mail_max_mb=1)
 
 
 def rdap_handler(request: httpx.Request):
@@ -57,6 +97,9 @@ def rdap_handler(request: httpx.Request):
             "entities": [{"roles": ["registrar"], "vcardArray": ["vcard", [["fn", {}, "text", "Domain The Net"]]]}],
             "nameservers": [{"ldhName": "NS1.EXAMPLE.NET"}],
         })
+    if path == "/domain/new-domain.example":
+        reg = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=5)).isoformat()
+        return httpx.Response(200, json={"events": [{"eventAction": "registration", "eventDate": reg}]})
     if path.startswith("/ip/"):
         return httpx.Response(200, json={
             "name": "HETZNER-CLOUD", "startAddress": "2.31.0.0", "endAddress": "2.31.255.255", "country": "DE",
@@ -73,6 +116,8 @@ def net_client(net_settings):
         st.push_sender = c.pusher
         st.net_resolve = fake_resolve
         st.net_transport = httpx.MockTransport(rdap_handler)
+        c.vt = []
+        st.vt_transport = httpx.MockTransport(lambda r: vt_handler(c.vt, r))
         yield c
 
 
@@ -372,3 +417,225 @@ def test_secret_expires(net_client, admin):
     assert Device(net_client, "room").post(f"/api/secrets/{sid}/open").status_code == 404
     asyncio.run(st.cleanup())
     assert st.one("SELECT 1 FROM secrets WHERE id=?", sid) is None
+
+
+
+# ======================================================= v2.4: ссылки и письма
+
+
+def vt_handler(log, request: httpx.Request):
+    log.append((request.method, request.url.path))
+    assert request.headers["x-apikey"] == "test-key"
+    if request.method == "POST":
+        return httpx.Response(200, json={"data": {"id": "a1"}})
+    if request.url.path.startswith("/api/v3/files/"):
+        if request.url.path.endswith("0" * 64):
+            return httpx.Response(404, json={})
+        return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": {
+            "malicious": 0, "suspicious": 0, "harmless": 0, "undetected": 60}}}})
+    return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": {
+        "malicious": 3, "suspicious": 1, "harmless": 60, "undetected": 10}}}})
+
+
+class Site(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        routes = {
+            "/r1": (302, {"Location": "/r2"}, b""),
+            "/r2": (301, {"Location": "/login"}, b""),
+            "/meta": (200, {"Content-Type": "text/html"},
+                      b'<html><head><meta http-equiv="refresh" content="0;url=/login"></head></html>'),
+            "/login": (200, {"Content-Type": "text/html; charset=utf-8"},
+                       b"<html><head><title>Sign in to your account</title></head>"
+                       b"<body><form><input type='password' name='p'></form></body></html>"),
+            "/plain": (200, {"Content-Type": "text/html"}, b"<title>Hello</title><p>ok</p>"),
+            "/evil": (302, {"Location": "http://169.254.169.254/latest/meta-data"}, b""),
+        }
+        code, headers, body = routes.get(self.path, (404, {}, b""))
+        self.send_response(code)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def site():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    srv.server_close()
+
+
+def texts(report):
+    return [c["text"] for c in report["checks"]]
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://login.microsoftonline.com/x", []),
+    ("https://contoso.sharepoint.com/sites/a", []),
+    ("https://microsoft.com.secure-login.xyz/a", ["В адресе есть «microsoft», но сайт на самом деле — secure-login.xyz"]),
+    ("https://leumi.co.il.verify-account.co/a", ["В адресе есть «leumi», но сайт на самом деле — verify-account.co"]),
+    ("https://xn--pple-43d.com/", ["Адрес с необычными буквами (аpple.com) — так подделывают известные сайты"]),
+    ("http://203.0.113.5/login", ["Вместо имени сайта — голый IP-адрес"]),
+    ("https://www.paypal.com@evil.example/", ["В ссылке есть «@»: браузер откроет не тот сайт, что написан в начале"]),
+    ("https://bit.ly/abc", ["Короткая ссылка: настоящий адрес скрыт"]),
+])
+def test_url_flags(url, expected):
+    got = [f["text"] for f in nettools.url_flags(url) if f["status"] != "info" or f.get("kind") == "short"]
+    assert got == expected
+
+
+def test_registrable_domain():
+    assert nettools.registrable("a.b.contoso.co.il") == "contoso.co.il"
+    assert nettools.registrable("login.microsoftonline.com") == "microsoftonline.com"
+    assert nettools.registrable("x.y.co.uk") == "y.co.uk"
+    assert nettools.registrable("127.0.0.1") == "127.0.0.1"
+
+
+def test_url_redirect_chain_password_page_and_virustotal(net_client, admin, site):
+    r = admin.post("/api/net/url", json={"url": f"{site}/r1"})
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert [h["status"] for h in rep["chain"]] == [302, 301, 200]
+    assert rep["final"] == f"{site}/login" and rep["title"] == "Sign in to your account" and rep["password_form"]
+    t = texts(rep)
+    assert t[0] == "VirusTotal: опасно по мнению 3 из 74 проверок"
+    assert any(x.startswith("Страница просит ввести пароль") for x in t)
+    assert net_client.vt[-1][0] == "GET"   # только поиск — ссылка не отправляется в VirusTotal без кнопки
+
+
+def test_url_meta_refresh_followed(admin, site):
+    rep = admin.post("/api/net/url", json={"url": f"{site}/meta"}).json()
+    assert rep["final"].endswith("/login") and len(rep["chain"]) == 2
+
+
+def test_url_redirect_into_internal_network_blocked(client, pc, phone, site):
+    """Даже если внешний сайт перенаправит на внутренний адрес — туда не идём."""
+    pair(pc, phone)
+    # обычные настройки: 127.0.0.1 запрещён с первого шага
+    assert phone.post("/api/net/url", json={"url": f"{site}/plain"}).status_code == 400
+
+
+def test_url_redirect_to_metadata_blocked(admin, site):
+    r = admin.post("/api/net/url", json={"url": f"{site}/evil"})
+    rep = r.json()
+    assert rep["chain"][-1] == {"url": "http://169.254.169.254/latest/meta-data", "status": None, "blocked": True}
+    assert "Ссылка перенаправляет во внутреннюю сеть — проверка остановлена" in texts(rep)
+
+
+def test_url_vt_submit_and_validation(net_client, admin):
+    assert admin.post("/api/net/url", json={"url": "ftp://x"}).status_code == 400
+    assert admin.post("/api/net/url/vt-submit", json={"url": "https://example.com/a"}).json() == {"ok": True}
+    assert net_client.vt[-1] == ("POST", "/api/v3/urls")
+
+
+def test_domain_age():
+    reg, days = asyncio.run(nettools.domain_age_days("new-domain.example", httpx.MockTransport(rdap_handler)))
+    assert days == 5
+
+
+def make_eml(attachments, html="", text="", subject="Счёт"):
+    m = email.message.EmailMessage()
+    m["From"] = "Bank <info@bank.example>"
+    m["To"] = "roman@contoso.co.il"
+    m["Subject"] = subject
+    m["Received"] = "from mail.bank.example (unknown [203.0.113.7]) by mx.contoso.co.il; Mon, 9 Nov 2026 10:00:01 +0000"
+    m.set_content(text or "Hello")
+    if html:
+        m.add_alternative(html, subtype="html")
+    for name, data, maintype, subtype in attachments:
+        m.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+    return m.as_bytes()
+
+
+def encrypted_zip(inner_name):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(inner_name, b"x")
+    data = bytearray(buf.getvalue())
+    # ставим флаг «зашифрован» в заголовках (для проверки хватает флага в оглавлении)
+    for sig, off in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        i = data.find(sig)
+        data[i + off] |= 0x1
+    return bytes(data)
+
+
+def test_mail_check(net_client, admin, clamd):
+    eml = make_eml(
+        [("invoice.pdf.exe", b"MZ fake EICAR payload", "application", "octet-stream"),
+         ("report.docm", b"PK\x03\x04 doc", "application", "octet-stream"),
+         ("files.zip", encrypted_zip("setup.exe"), "application", "zip"),
+         ("login.html", b"<form>", "text", "html"),
+         ("photo.jpg", b"\xff\xd8 jpeg", "image", "jpeg")],
+        html='<p>Hi <a href="http://evil.example/login">www.leumi.co.il</a> and '
+             '<a href="https://bit.ly/x">here</a> <a href="https://docs.contoso.co.il/a">docs.contoso.co.il</a></p>',
+        text="See https://example.com/page.")
+    r = admin.post("/api/net/mail", files={"file": ("mail.eml", eml, "message/rfc822")})
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["subject"] == "Счёт" and "Received: from mail.bank.example" in rep["headers"]
+    att = {a["name"]: a for a in rep["attachments"]}
+    exe = [f["text"] for f in att["invoice.pdf.exe"]["flags"]]
+    assert exe[0] == "Антивирус: Eicar-Test-Signature"
+    assert "Двойное расширение: выглядит как .pdf, а на самом деле .exe — программа" in exe
+    assert att["invoice.pdf.exe"]["av"] == {"status": "found", "name": "Eicar-Test-Signature"}
+    assert any("макросами" in f["text"] for f in att["report.docm"]["flags"])
+    zip_flags = [f["text"] for f in att["files.zip"]["flags"]]
+    assert any(x.startswith("Архив с паролем") for x in zip_flags) and "Внутри архива программа: setup.exe" in zip_flags
+    assert att["login.html"]["flags"][0]["status"] == "warn"
+    assert att["photo.jpg"]["av"]["status"] == "clean" and "data" not in att["photo.jpg"]
+    assert len(att["photo.jpg"]["sha256"]) == 64
+    # VirusTotal — не больше 3 отпечатков, самые подозрительные первыми; файлы туда не уходят
+    assert [m for m, _ in net_client.vt] == ["GET"] * 3
+    assert all(p.startswith("/api/v3/files/") for _, p in net_client.vt)
+    links = {l["url"]: l for l in rep["links"]}
+    assert links["http://evil.example/login"]["flags"][0]["text"] == "Текст ссылки — www.leumi.co.il, а ведёт она на evil.example"
+    assert rep["links"][0]["url"] == "http://evil.example/login"
+    assert links["https://bit.ly/x"]["flags"][0]["text"] == "Короткая ссылка: настоящий адрес скрыт"
+    assert links["https://docs.contoso.co.il/a"]["flags"] == []
+    assert "https://example.com/page" in links
+    assert rep["av"]["status"] == "clean" and rep["vt"] is True
+    # антивирус проверил всё письмо и каждое вложение
+    assert len(clamd.scanned) == 1 + 5
+
+
+def test_mail_check_without_antivirus(net_client, admin, clamd):
+    net_client.app.state.store  # noqa: B018
+    clamd.shutdown()
+    clamd.server_close()
+    r = admin.post("/api/net/mail", files={"file": ("m.eml", make_eml([("a.txt", b"hi", "text", "plain")]), "message/rfc822")})
+    assert r.status_code == 200
+    assert r.json()["av"]["status"] == "unavailable" and r.json()["attachments"][0]["av"] is None
+
+
+def test_mail_errors(net_client, admin):
+    assert admin.post("/api/net/mail", files={"file": ("m.msg", b"not an ole file", "application/octet-stream")}).status_code == 400
+    assert admin.post("/api/net/mail", files={"file": ("m.eml", b"\x00\x01binary", "message/rfc822")}).status_code == 400
+    big = make_eml([("big.bin", b"0" * (1024 * 1024 + 10), "application", "octet-stream")])
+    assert admin.post("/api/net/mail", files={"file": ("m.eml", big, "message/rfc822")}).status_code == 413
+    assert admin.post("/api/net/mail", data={"x": "1"}).status_code == 400
+    rid, code = new_room(admin, title="Клиент", owner_name="Роман")
+    guest = join(net_client, code)
+    assert guest.post("/api/net/mail", files={"file": ("m.eml", b"x", "message/rfc822")}).status_code == 403
+
+
+def test_attachment_flags_units():
+    f = lambda n, d=b"": [x["text"] for x in mailcheck.attachment_flags(n, d)]  # noqa: E731
+    assert f("photo‮gpj.exe")[0].startswith("В имени файла спрятан символ")
+    assert f("notes.txt") == []
+    assert f("doc.pdf") == []
+    assert f("update.ps1") == ["Файл .ps1 может запустить программу — не открывай, если не ждал его"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/vbaProject.bin", b"x")
+    assert f("contract.docx", buf.getvalue()) == ["Документ притворяется обычным (.docx), но внутри макросы"]
+
+
+def test_ports_report_says_where_from(admin, tls_server):
+    r = admin.post("/api/net/ports", json={"host": "127.0.0.1", "ports": str(tls_server)})
+    assert "from" in r.json()   # на сервере — IP и страна; в тестах адрес сайта не находится в DNS

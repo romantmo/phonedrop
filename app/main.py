@@ -47,7 +47,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.datastructures import Headers, UploadFile
 
-from . import nettools
+from . import mailcheck, nettools
 from .i18n import LANG_COOKIE, T, pick_lang, tr
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -144,7 +144,7 @@ CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; "
     "img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; "
     "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
-    "manifest-src 'self'; worker-src 'self'; connect-src 'self'"
+    "manifest-src 'self'; worker-src 'self'; connect-src 'self' https://speed.cloudflare.com"
 )
 HOST_RE = re.compile(r"[A-Za-z0-9.\-:\[\]]+")
 
@@ -336,6 +336,11 @@ class Settings:
     call_rering_sec: float = field(default_factory=lambda: _env_int("CALL_RERING_SEC", 10))
     # Инструменты сисадмина (v2.3). Внутренние адреса проверять нельзя; 1 — только для автотестов.
     net_allow_private: bool = field(default_factory=lambda: os.getenv("NET_ALLOW_PRIVATE", "") == "1")
+    # v2.4: VirusTotal (ключ только в .env, бесплатный — для личного использования) и антивирус ClamAV.
+    vt_api_key: str = field(default_factory=lambda: os.getenv("VT_API_KEY", ""))
+    clamav_host: str = field(default_factory=lambda: os.getenv("CLAMAV_HOST", "clamav"))
+    clamav_port: int = field(default_factory=lambda: _env_int("CLAMAV_PORT", 3310))
+    mail_max_mb: int = field(default_factory=lambda: _env_int("MAIL_MAX_MB", 25))
 
     @property
     def google_enabled(self) -> bool:
@@ -1003,6 +1008,13 @@ class RateLimiter:
         if len(q) >= limit:
             raise HTTPException(429, "Слишком много запросов. Подожди немного и попробуй снова")
         q.append(now)
+
+    def allow(self, key: str, limit: int, window_sec: int) -> bool:
+        try:
+            self.hit(key, limit, window_sec)
+            return True
+        except HTTPException:
+            return False
 
     def prune(self) -> None:
         now = time.monotonic()
@@ -2971,7 +2983,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def net_ports(request: Request):
         who, body = await net_body(request)
         limiter.hit(f"net-ports:{who}", 60, 600)   # 60 проверок портов за 10 минут — это не сканер
-        return await net_call(request, nettools.ports_report(body.get("host"), body.get("ports"), settings.net_allow_private))
+        report = await net_call(request, nettools.ports_report(body.get("host"), body.get("ports"), settings.net_allow_private))
+        report["from"] = await probe_origin()
+        return report
+
+    async def probe_origin() -> dict | None:
+        """Откуда идут проверки: IP нашего сервера и страна (видно получателю — и важно при гео-фильтре)."""
+        cached = getattr(store, "net_origin", None)
+        if cached and cached[0] > time.time():
+            return cached[1]
+        origin = None
+        host = urlsplit(settings.public_url).hostname or ""
+        try:
+            ips = await nettools.public_ips(nettools.clean_host(host))
+            info = await nettools.rdap(ips[0], store.net_transport)
+            origin = {"ip": ips[0], "country": info.get("country")}
+        except (nettools.NetError, ValueError):
+            origin = None
+        store.net_origin = (time.time() + (DAY if origin else 600), origin)
+        return origin
 
     @app.post("/api/net/whois")
     async def net_whois(request: Request):
@@ -3006,6 +3036,83 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except nettools.NetError as exc:
             raise HTTPException(400, exc.args[0])
         return {"svg": make_qr_svg(text)}
+
+
+    # ---------- v2.4: проверка ссылки и письма
+
+    def vt_allowed() -> bool:
+        # Бесплатный ключ VirusTotal: 4 запроса в минуту и 500 в сутки на весь сервер.
+        return limiter.allow("vt:min", 4, 60) and limiter.allow("vt:day", 500, DAY)
+
+    @app.post("/api/net/url")
+    async def net_url(request: Request):
+        who, body = await net_body(request)
+        limiter.hit(f"net-url:{who}", 30, 600)
+        return await net_call(request, nettools.url_report(
+            body.get("url"), settings.net_allow_private, store.net_transport,
+            settings.vt_api_key or None, store.vt_transport, vt_allowed))
+
+    @app.post("/api/net/url/vt-submit")
+    async def net_url_vt_submit(request: Request):
+        """Отправить ссылку на проверку в VirusTotal (она станет видна в VirusTotal)."""
+        _, body = await net_body(request)
+        if not settings.vt_api_key:
+            raise HTTPException(400, "VirusTotal не подключён на сервере")
+        try:
+            url = nettools.clean_url(body.get("url"))
+        except nettools.NetError as exc:
+            raise HTTPException(400, exc.args[0])
+        if not vt_allowed():
+            raise HTTPException(429, "VirusTotal: можно 4 проверки в минуту — попробуй через минуту")
+        if not await nettools.vt_submit_url(url, settings.vt_api_key, store.vt_transport):
+            raise HTTPException(502, "VirusTotal не ответил")
+        return {"ok": True}
+
+    store.vt_transport = None
+
+    @app.post("/api/net/mail")
+    async def net_mail(request: Request):
+        """Проверка письма: файл .eml или .msg. Письмо нигде не сохраняется — только разбирается в памяти."""
+        who = net_user(request)
+        limiter.hit(f"net-mail:{who}", 20, 600)
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise HTTPException(400, "Выбери файл письма (.eml или .msg)")
+        limit = settings.mail_max_mb * MB
+        raw = await upload.read(limit + 1)
+        await upload.close()
+        if len(raw) > limit:
+            raise HTTPException(413, T("Письмо больше {mb} МБ", mb=settings.mail_max_mb))
+        lang = lang_of(request)
+        try:
+            mail = await run_in_threadpool(mailcheck.parse_mail, raw, upload.filename or "")
+        except mailcheck.MailError as exc:
+            raise HTTPException(400, exc.args[0])
+        except Exception:  # noqa: BLE001 — повреждённый файл
+            raise HTTPException(400, "Не получилось разобрать письмо — файл повреждён")
+        atts = mail["attachments"]
+        # Антивирус: всё письмо целиком и каждое вложение отдельно (так видно, какое именно заражено).
+        av = await nettools.clamd_scan(raw, settings.clamav_host, settings.clamav_port)
+        for a in atts:
+            a["av"] = (await nettools.clamd_scan(a["data"], settings.clamav_host, settings.clamav_port)
+                       if a["data"] and av["status"] != "unavailable" else None)
+        # VirusTotal: только «отпечатки» (sha256) — сами файлы не отправляем. Сначала самые подозрительные.
+        if settings.vt_api_key:
+            rank = {"bad": 0, "warn": 1}
+            for a in sorted(atts, key=lambda x: min([rank.get(f["status"], 2) for f in x["flags"]] or [3]))[:3]:
+                if not a["data"]:
+                    continue
+                a["vt"] = (await nettools.vt_lookup("files", a["sha256"], settings.vt_api_key, store.vt_transport)
+                           if vt_allowed() else {"error": T("VirusTotal: можно 4 проверки в минуту — попробуй через минуту")})
+                a["flags"] = a["flags"] + nettools.vt_checks(a["vt"], T("этот файл"))
+        for a in atts:
+            a.pop("data", None)
+            if a.get("av") and a["av"]["status"] == "found":
+                a["flags"].insert(0, nettools._check("bad", T("Антивирус: {name}", name=a["av"]["name"])))
+        return localize({"subject": mail["subject"], "from": mail["from"], "headers": mail["headers"],
+                         "links": mail["links"], "attachments": atts, "av": av,
+                         "vt": bool(settings.vt_api_key)}, lang)
 
     # ---------- одноразовая ссылка («прочитать один раз»)
     # Шифрует браузер автора (AES-256-GCM), ключ — в части ссылки после «#», которую браузер на сервер

@@ -13,17 +13,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import re
 import socket
 import ssl
 import time
 from datetime import datetime, timezone
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import dns.asyncresolver
 import dns.exception
 import dns.resolver
 import dns.reversename
+import html as htmllib
 import httpx
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -89,7 +92,8 @@ async def public_ips(host: str, allow_private: bool = False) -> list[str]:
         ips = list(dict.fromkeys(info[4][0] for info in infos))
     if not ips:
         raise NetError(T("Имя {host} не находится в DNS", host=host))
-    if not allow_private and not all(is_public(ip) for ip in ips):
+    # allow_private (только автотесты) разрешает лишь сам компьютер (127.0.0.1) — остальное закрыто всегда
+    if not all(is_public(ip) or (allow_private and ipaddress.ip_address(ip).is_loopback) for ip in ips):
         raise NetError(T("Внутренние адреса проверять нельзя — только адреса в интернете"))
     # Сначала IPv4: так поведение привычнее для сисадмина (и у сервера точно есть IPv4).
     return sorted(ips, key=lambda ip: ":" in ip)
@@ -119,8 +123,8 @@ async def default_resolve(name: str, rdtype: str) -> list[str]:
     return out
 
 
-def _check(status: str, text) -> dict:
-    return {"status": status, "text": text}
+def _check(status: str, text, kind: str | None = None) -> dict:
+    return {"status": status, "text": text, **({"kind": kind} if kind else {})}
 
 
 async def _spf_lookups(record: str, resolve, depth: int = 0, seen: set | None = None) -> int:
@@ -510,3 +514,328 @@ def wifi_qr_text(ssid, password, security, hidden) -> str:
     if hidden:
         text += "H:true;"
     return text + ";"
+
+
+# ------------------------------------------------------- проверка ссылки (v2.4)
+# Сервер проходит по ссылке как браузер, но ничего не выполняет: только смотрит, куда она ведёт.
+# Каждый переход проверяется на внутренние адреса (как порты и SSL), подключение — к проверенному IP.
+
+SHORTENERS = {
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "rebrand.ly", "cutt.ly",
+    "shorturl.at", "tiny.cc", "rb.gy", "s.id", "t.ly", "lnkd.in", "bl.ink", "short.io", "v.gd", "x.gd",
+    "qrco.de", "qr.codes", "surl.li", "clck.ru", "did.li", "l.ead.me",
+}
+# Если имя бренда есть в адресе, а сам домен — чужой, это классический фишинг: microsoft.com.secure-login.xyz
+BRANDS = (
+    "microsoft", "office365", "outlook", "onedrive", "sharepoint", "live", "apple", "icloud", "google",
+    "gmail", "paypal", "amazon", "facebook", "instagram", "whatsapp", "netflix", "dhl", "fedex", "linkedin",
+    "docusign", "dropbox", "adobe", "leumi", "hapoalim", "mizrahi", "discountbank", "israelpost", "bit",
+)
+SECOND_LEVEL = {"co", "com", "org", "net", "ac", "gov", "edu", "muni", "k12", "idf", "ltd", "plc", "me", "or", "ne"}
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/130.0 Safari/537.36")
+MAX_HOPS = 10
+PAGE_LIMIT = 256 * 1024
+
+
+def registrable(host: str) -> str:
+    """Основной домен: login.secure.contoso.co.il → contoso.co.il (без полного списка зон — по простому правилу)."""
+    try:
+        ipaddress.ip_address(host)
+        return host                      # для IP-адреса «домена» нет
+    except ValueError:
+        pass
+    parts = host.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in SECOND_LEVEL:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def clean_url(raw) -> str:
+    if not isinstance(raw, str) or not raw.strip() or len(raw) > 4000:
+        raise NetError(T("Вставь ссылку, например https://example.com/page"))
+    text = raw.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", text, re.I):
+        text = "http://" + text
+    parts = urlsplit(text)
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise NetError(T("Проверяются только ссылки http и https"))
+    return text
+
+
+def url_flags(url: str) -> list[dict]:
+    """Признаки опасности, видные по самому адресу — без похода в интернет."""
+    flags = []
+    parts = urlsplit(url)
+    raw_host = (parts.hostname or "").lower()
+    try:
+        ipaddress.ip_address(raw_host)
+        flags.append(_check("warn", T("Вместо имени сайта — голый IP-адрес")))
+        return flags
+    except ValueError:
+        pass
+    try:
+        host = raw_host.encode("idna").decode("ascii")
+    except UnicodeError:
+        host = raw_host
+    if "xn--" in host:
+        try:
+            shown = host.encode("ascii").decode("idna")
+        except UnicodeError:
+            shown = raw_host
+        flags.append(_check("warn", T("Адрес с необычными буквами ({shown}) — так подделывают известные сайты", shown=shown)))
+    if "@" in parts.netloc:
+        flags.append(_check("bad", T("В ссылке есть «@»: браузер откроет не тот сайт, что написан в начале")))
+    base = registrable(host)
+    labels = host[: -len(base)].split(".") if host.endswith(base) else []
+    sub = ".".join(labels)
+    for brand in BRANDS:
+        if brand == "bit":
+            continue
+        if re.search(rf"(^|[.-]){brand}([.-]|$)", sub) and brand not in base:
+            flags.append(_check("bad", T("В адресе есть «{brand}», но сайт на самом деле — {domain}", brand=brand, domain=base)))
+            break
+    if host in SHORTENERS or base in SHORTENERS:
+        flags.append(_check("info", T("Короткая ссылка: настоящий адрес скрыт"), "short"))
+    if parts.scheme.lower() == "http":
+        flags.append(_check("info", T("Без шифрования (http) — то, что вводишь на сайте, видно по дороге")))
+    return flags
+
+
+def _title(html: str) -> str | None:
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    if not m:
+        return None
+    return re.sub(r"\s+", " ", htmllib.unescape(m.group(1))).strip()[:200] or None
+
+
+def _meta_refresh(html: str) -> str | None:
+    m = re.search(r"<meta[^>]+http-equiv=[\"']?refresh[\"']?[^>]*content=[\"'][^\"']*url=([^\"'>]+)", html, re.I)
+    return m.group(1).strip() if m else None
+
+
+async def _fetch_once(url: str, allow_private: bool, verify: bool) -> tuple[int, dict, str, str]:
+    parts = urlsplit(url)
+    host = clean_host(parts.hostname or "")
+    ip = (await public_ips(host, allow_private))[0]
+    https = parts.scheme.lower() == "https"
+    port = parts.port or (443 if https else 80)
+    ip_host = f"[{ip}]" if ":" in ip else ip
+    target = urlunsplit((parts.scheme.lower(), f"{ip_host}:{port}", parts.path or "/", parts.query, ""))
+    host_header = host if parts.port is None else f"{host}:{parts.port}"
+    headers = {"Host": host_header, "User-Agent": BROWSER_UA, "Accept": "text/html,*/*;q=0.8",
+               "Accept-Language": "en,he;q=0.8"}
+    async with httpx.AsyncClient(verify=verify, timeout=8, follow_redirects=False, trust_env=False) as client:
+        request = client.build_request("GET", target, headers=headers,
+                                       extensions={"sni_hostname": host} if https else {})
+        response = await client.send(request, stream=True)
+        try:
+            body = b""
+            if "html" in response.headers.get("content-type", ""):
+                async for chunk in response.aiter_raw():
+                    body += chunk
+                    if len(body) >= PAGE_LIMIT:
+                        break
+            # сжатые ответы не распаковываем: нам хватает заголовков и, если повезёт, начала страницы
+            text = body.decode("utf-8", "replace") if response.headers.get("content-encoding") in (None, "identity") else ""
+            return response.status_code, dict(response.headers), text, ip
+        finally:
+            await response.aclose()
+
+
+async def follow_url(url: str, allow_private: bool = False) -> dict:
+    """Проходит по переадресациям (до 10), каждую проверяя заново."""
+    chain, cert_problem, page = [], None, ""
+    current = url
+    for hop in range(MAX_HOPS):
+        try:
+            status, headers, page, ip = await _fetch_once(current, allow_private, True)
+        except NetError:
+            if not hop:
+                raise
+            chain.append({"url": current[:500], "status": None, "blocked": True})
+            return {"chain": chain, "error": None, "cert_problem": cert_problem, "page": "",
+                    "blocked": T("Ссылка перенаправляет во внутреннюю сеть — проверка остановлена")}
+        except httpx.ConnectError as exc:
+            if "CERTIFICATE_VERIFY_FAILED" not in str(exc) and "certificate" not in str(exc).lower():
+                chain.append({"url": current, "status": None})
+                return {"chain": chain, "error": T("Сайт не ответил"), "cert_problem": cert_problem, "page": ""}
+            cert_problem = cert_problem or T("Сертификат сайта не прошёл проверку — браузер покажет предупреждение")
+            try:
+                status, headers, page, ip = await _fetch_once(current, allow_private, False)
+            except httpx.HTTPError:
+                chain.append({"url": current, "status": None})
+                return {"chain": chain, "error": T("Сайт не ответил"), "cert_problem": cert_problem, "page": ""}
+        except (httpx.HTTPError, ssl.SSLError, OSError):
+            chain.append({"url": current, "status": None})
+            return {"chain": chain, "error": T("Сайт не ответил"), "cert_problem": cert_problem, "page": ""}
+        chain.append({"url": current, "status": status, "ip": ip})
+        location = headers.get("location") if 300 <= status < 400 else _meta_refresh(page) if status == 200 else None
+        if not location:
+            break
+        nxt = urljoin(current, location)
+        if urlsplit(nxt).scheme.lower() not in ("http", "https"):
+            chain.append({"url": nxt[:500], "status": None})
+            break
+        current = nxt
+    return {"chain": chain, "error": None, "cert_problem": cert_problem, "page": page}
+
+
+# --------------------------------------------------------------- VirusTotal
+# Ключ — только в .env на сервере (VT_API_KEY). Бесплатный ключ: 4 запроса в минуту, 500 в сутки,
+# только для личного использования. Файлы туда НЕ отправляем — только «отпечаток» (sha256).
+
+VT_API = "https://www.virustotal.com/api/v3"
+
+
+def _vt_stats(data: dict) -> dict:
+    attrs = data.get("data", {}).get("attributes", {})
+    stats = attrs.get("last_analysis_stats") or attrs.get("stats") or {}
+    return {
+        "found": True,
+        "malicious": int(stats.get("malicious", 0)),
+        "suspicious": int(stats.get("suspicious", 0)),
+        "harmless": int(stats.get("harmless", 0)),
+        "undetected": int(stats.get("undetected", 0)),
+        "date": attrs.get("last_analysis_date"),
+    }
+
+
+async def vt_lookup(kind: str, ident: str, key: str, transport=None) -> dict:
+    """kind: urls или files. Ответ: found/malicious/suspicious… или found=False."""
+    if kind == "urls":
+        ident = base64.urlsafe_b64encode(ident.encode()).decode().rstrip("=")
+    try:
+        async with httpx.AsyncClient(transport=transport, timeout=15) as client:
+            r = await client.get(f"{VT_API}/{kind}/{ident}", headers={"x-apikey": key})
+    except httpx.HTTPError:
+        return {"error": T("VirusTotal не ответил")}
+    if r.status_code == 404:
+        return {"found": False}
+    if r.status_code == 429:
+        return {"error": T("VirusTotal: закончился лимит бесплатного ключа — попробуй позже")}
+    if r.status_code in (401, 403):
+        return {"error": T("VirusTotal не принял ключ — проверь VT_API_KEY на сервере")}
+    if r.status_code != 200:
+        return {"error": T("VirusTotal не ответил")}
+    try:
+        return _vt_stats(r.json())
+    except ValueError:
+        return {"error": T("VirusTotal не ответил")}
+
+
+async def vt_submit_url(url: str, key: str, transport=None) -> bool:
+    try:
+        async with httpx.AsyncClient(transport=transport, timeout=15) as client:
+            r = await client.post(f"{VT_API}/urls", headers={"x-apikey": key}, data={"url": url})
+    except httpx.HTTPError:
+        return False
+    return r.status_code == 200
+
+
+def vt_checks(vt: dict | None, what) -> list[dict]:
+    if not vt:
+        return []
+    if vt.get("error"):
+        return [_check("info", vt["error"])]
+    if not vt.get("found"):
+        return [_check("info", T("VirusTotal ещё не видел {what}", what=what))]
+    total = vt["malicious"] + vt["suspicious"] + vt["harmless"] + vt["undetected"]
+    if vt["malicious"]:
+        return [_check("bad", T("VirusTotal: опасно по мнению {n} из {total} проверок", n=vt["malicious"], total=total))]
+    if vt["suspicious"]:
+        return [_check("warn", T("VirusTotal: подозрительно по мнению {n} из {total} проверок", n=vt["suspicious"], total=total))]
+    return [_check("ok", T("VirusTotal: ничего не найдено ({total} проверок)", total=total))]
+
+
+async def domain_age_days(domain: str, transport=None) -> tuple[str | None, int | None]:
+    try:
+        info = await rdap(domain, transport)
+    except NetError:
+        return None, None
+    reg = info.get("registered")
+    if not reg:
+        return None, None
+    try:
+        days = (datetime.now(timezone.utc) - datetime.fromisoformat(reg).replace(tzinfo=timezone.utc)).days
+    except ValueError:
+        return reg, None
+    return reg, days
+
+
+async def url_report(raw, allow_private: bool = False, rdap_transport=None, vt_key: str | None = None,
+                     vt_transport=None, vt_allowed=lambda: True) -> dict:
+    url = clean_url(raw)
+    checks = url_flags(url)
+    trip = await follow_url(url, allow_private)
+    chain = trip["chain"]
+    final = chain[-1]["url"] if chain else url
+    final_host = clean_host(urlsplit(final).hostname or "")
+    if final != url:
+        checks += [c for c in url_flags(final) if c["text"] not in {x["text"] for x in checks}]
+    if len(chain) > 4:
+        checks.append(_check("warn", T("Много переадресаций ({n}) — так прячут настоящий адрес", n=len(chain) - 1)))
+    if trip["cert_problem"]:
+        checks.append(_check("bad", trip["cert_problem"]))
+    if trip["error"]:
+        checks.append(_check("info", trip["error"]))
+    if trip.get("blocked"):
+        checks.append(_check("bad", trip["blocked"]))
+    page = trip["page"] or ""
+    password_form = bool(re.search(r"<input[^>]+type=[\"']?password", page, re.I))
+    if password_form:
+        checks.append(_check("warn", T("Страница просит ввести пароль — убедись, что это настоящий сайт: {domain}",
+                                       domain=registrable(final_host))))
+    registered, age = None, None
+    try:
+        ipaddress.ip_address(final_host)
+    except ValueError:
+        registered, age = await domain_age_days(registrable(final_host), rdap_transport)
+    if age is not None and age < 30:
+        checks.append(_check("bad", T("Домен зарегистрирован {days} дн. назад — у фишинга почти всегда новые домены", days=age)))
+    elif age is not None and age < 180:
+        checks.append(_check("warn", T("Домену меньше полугода ({days} дн.)", days=age)))
+    vt = None
+    if vt_key:
+        vt = await vt_lookup("urls", final, vt_key, vt_transport) if vt_allowed() else {
+            "error": T("VirusTotal: можно 4 проверки в минуту — попробуй через минуту")}
+        checks += vt_checks(vt, T("эту ссылку"))
+    if not any(c["status"] in ("bad", "warn") for c in checks):
+        checks.insert(0, _check("ok", T("Явных признаков опасности не найдено")))
+    return {
+        "url": url, "final": final, "domain": registrable(final_host), "chain": chain,
+        "registered": registered, "age_days": age, "title": _title(page), "password_form": password_form,
+        "checks": sorted(checks, key=lambda c: ("bad", "warn", "info", "ok").index(c["status"])),
+        "vt": vt,
+    }
+
+
+# ----------------------------------------------------------------- ClamAV
+async def clamd_scan(data: bytes, host: str, port: int, timeout: float = 90) -> dict:
+    """Проверка антивирусом ClamAV (контейнер clamav). Ответ: clean / found (+имя) / error / unavailable."""
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), 5)
+    except (OSError, asyncio.TimeoutError):
+        return {"status": "unavailable"}
+    try:
+        writer.write(b"zINSTREAM\0")
+        view = memoryview(data)
+        for i in range(0, len(data), 65536):
+            chunk = view[i:i + 65536]
+            writer.write(len(chunk).to_bytes(4, "big") + bytes(chunk))
+            await writer.drain()
+        writer.write(b"\0\0\0\0")
+        await writer.drain()
+        reply = (await asyncio.wait_for(reader.read(4096), timeout)).decode("utf-8", "replace").strip("\0\n ")
+    except (OSError, asyncio.TimeoutError):
+        return {"status": "unavailable"}
+    finally:
+        writer.close()
+    if reply.endswith("FOUND"):
+        name = reply.split(":", 1)[-1].rsplit("FOUND", 1)[0].strip()
+        return {"status": "found", "name": name[:200]}
+    if reply.endswith(": OK") or reply == "stream: OK":
+        return {"status": "clean"}
+    if "size limit" in reply.lower():
+        return {"status": "error", "text": T("Слишком большой файл для антивируса")}
+    return {"status": "error", "text": T("Антивирус не смог проверить файл")}

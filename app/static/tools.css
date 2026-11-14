@@ -428,3 +428,15 @@
   font: 16px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 50vh; overflow: auto; user-select: all;
 }
+
+/* ---------- v2.4: скорость, ссылки, письма */
+.sp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sp-tile { display: flex; flex-direction: column; gap: 4px; padding: 14px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); }
+.sp-label { font-size: 13px; color: var(--muted); }
+.sp-value { font-size: 30px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sys-att { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel-2); }
+.sys-att .chip { align-self: flex-start; }
+.sys-att-head { display: flex; justify-content: space-between; gap: 10px; overflow-wrap: anywhere; }
+.sys-att-head span { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.sys-att .sys-copy { font-size: 11px; }
+.sys-link { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
