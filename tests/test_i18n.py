@@ -20,8 +20,15 @@ def fields(text: str) -> set[str]:
 
 
 def server_phrases() -> set[str]:
-    """Все русские строки из app/main.py, кроме комментариев, docstring'ов и SQL."""
-    tree = ast.parse((ROOT / "app" / "main.py").read_text("utf-8"))
+    """Все русские строки из app/main.py и app/nettools.py, кроме комментариев, docstring'ов и SQL."""
+    found = set()
+    for name in ("main.py", "nettools.py"):
+        found |= file_phrases(ROOT / "app" / name)
+    return found
+
+
+def file_phrases(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text("utf-8"))
     docs = {id(n.body[0].value) for n in ast.walk(tree)
             if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
             and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}

@@ -89,6 +89,10 @@ window.PDTools = (() => {
       ],
     },
   ];
+  // v2.3: «🧰 Для сисадмина» — свои экраны (sysadmin.js), без выбора файлов.
+  if (window.PDSysTools) TOOLS.push(...PDSysTools.TOOLS);
+  // Собеседнику по коду (без аккаунта) они не показываются — и сервер ему откажет.
+  const hiddenFor = (t) => t.group === "admin" && document.body.dataset.guest === "1";
 
   let tool = null;
   let items = [];      // [{ file, rot, preview }]
@@ -106,19 +110,23 @@ window.PDTools = (() => {
 
   // ---------- главный экран инструментов
   function renderHome(container, onOpen) {
+    const card = (t) => el("button", { class: "tool-card", type: "button", onclick: () => onOpen(t.id) },
+      el("span", { class: "tool-emoji" }, t.icon),
+      el("b", {}, t.title),
+      el("span", { class: "tool-sub" }, t.sub));
+    const files = TOOLS.filter((t) => !t.group && !(t.phoneOnly && ON_PC));
+    const admin = TOOLS.filter((t) => t.group === "admin" && !hiddenFor(t));
     container.replaceChildren(
-      el("div", { class: "tools-grid" }, ...TOOLS.filter((t) => !(t.phoneOnly && ON_PC)).map((t) =>
-        el("button", { class: "tool-card", type: "button", onclick: () => onOpen(t.id) },
-          el("span", { class: "tool-emoji" }, t.icon),
-          el("b", {}, t.title),
-          el("span", { class: "tool-sub" }, t.sub)))),
+      el("div", { class: "tools-grid" }, ...files.map(card)),
       el("p", { class: "tools-note" },
-        tx("🔒 Файлы обрабатываются на твоём сервере PhoneDrop, не на чужих сайтах. Результат хранится 30 минут и удаляется.")));
+        tx("🔒 Файлы обрабатываются на твоём сервере PhoneDrop, не на чужих сайтах. Результат хранится 30 минут и удаляется.")),
+      ...(admin.length ? [el("h3", { class: "tools-group" }, tx("🧰 Для сисадмина")),
+        el("div", { class: "tools-grid" }, ...admin.map(card))] : []));
   }
 
   // ---------- экран инструмента
   function open(id) {
-    const next = TOOLS.find((t) => t.id === id);
+    const next = TOOLS.find((t) => t.id === id && !hiddenFor(t));
     if (!next) return false;
     if (!tool || tool.id !== id) reset(next);
     return true;
@@ -137,7 +145,15 @@ window.PDTools = (() => {
     $("toolIcon").textContent = tool.icon;
     $("toolTitle").textContent = tool.title;
     $("toolSub").textContent = tool.sub;
-    $("toolHint").textContent = tool.hint + (ON_PC ? tx(" Файлы можно перетащить мышкой в это окно или вставить Ctrl+V.") : "");
+    const custom = !!tool.render;
+    $("toolHint").textContent = tool.hint + (ON_PC && !custom ? tx(" Файлы можно перетащить мышкой в это окно или вставить Ctrl+V.") : "");
+    $("toolCustom").hidden = !custom;
+    if (custom) {
+      for (const id of ["toolFiles", "toolAdd", "toolFoot", "toolOptions", "scanSettings"]) $(id).hidden = true;
+      tool.render($("toolCustom"));
+      return;
+    }
+    $("toolCustom").replaceChildren();
     for (const id of ["toolFiles", "toolAdd", "toolFoot"]) $(id).hidden = false;
     $("toolCamera").hidden = !tool.camera || ON_PC;
     $("toolPick").textContent = tool.camera && !ON_PC ? tx("🖼 Галерея") : tool.multi ? tx("📂 Выбрать файлы") : tx("📂 Выбрать файл");
@@ -597,14 +613,14 @@ window.PDTools = (() => {
   if (drop) {
     let depth = 0;
     view.parentElement.addEventListener("dragenter", (e) => {
-      if (view.hidden || !tool || ![...e.dataTransfer.types].includes("Files")) return;
+      if (view.hidden || !tool || tool.render || ![...e.dataTransfer.types].includes("Files")) return;
       depth++;
       drop.hidden = false;
     });
     view.parentElement.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; drop.hidden = true; } });
     view.parentElement.addEventListener("dragover", (e) => { if (!view.hidden) e.preventDefault(); });
     view.parentElement.addEventListener("drop", (e) => {
-      if (view.hidden) return;
+      if (view.hidden || !tool || tool.render) return;
       e.preventDefault();
       depth = 0;
       drop.hidden = true;
@@ -613,12 +629,12 @@ window.PDTools = (() => {
   }
   document.addEventListener("paste", (e) => {
     const files = [...(e.clipboardData?.files || [])];
-    if (!files.length || view.hidden || view.offsetParent === null || !tool) return;
+    if (!files.length || view.hidden || view.offsetParent === null || !tool || tool.render) return;
     e.preventDefault();
     addFiles(files);
   });
   $("toolShareAll").addEventListener("click", () => shareFiles(results));
   $("toolSendPc").addEventListener("click", sendToPc);
 
-  return { renderHome, open, has: (id) => TOOLS.some((t) => t.id === id) };
+  return { renderHome, open, has: (id) => TOOLS.some((t) => t.id === id && !hiddenFor(t)) };
 })();

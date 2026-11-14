@@ -47,6 +47,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.datastructures import Headers, UploadFile
 
+from . import nettools
 from .i18n import LANG_COOKIE, T, pick_lang, tr
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -259,6 +260,21 @@ CREATE TABLE IF NOT EXISTS scan_pages (
     name    TEXT NOT NULL,
     created REAL NOT NULL
 );
+
+-- v2.3: одноразовые ссылки для паролей. Сервер хранит ТОЛЬКО шифровку: ключ живёт в ссылке после «#»
+-- и на сервер не попадает. После открытия шифровка стирается, остаётся отметка «открыта» для автора.
+CREATE TABLE IF NOT EXISTS secrets (
+    id      TEXT PRIMARY KEY,
+    owner   TEXT NOT NULL,
+    label   TEXT NOT NULL DEFAULT '',
+    iv      TEXT,
+    ct      TEXT,
+    notify  INTEGER NOT NULL DEFAULT 1,
+    created REAL NOT NULL,
+    expires REAL NOT NULL,
+    opened  REAL
+);
+CREATE INDEX IF NOT EXISTS secrets_by_owner ON secrets(owner);
 """
 
 
@@ -318,6 +334,8 @@ class Settings:
     turn_port: int = field(default_factory=lambda: _env_int("TURN_PORT", 3478))
     call_ring_sec: float = field(default_factory=lambda: _env_int("CALL_RING_SEC", 45))
     call_rering_sec: float = field(default_factory=lambda: _env_int("CALL_RERING_SEC", 10))
+    # Инструменты сисадмина (v2.3). Внутренние адреса проверять нельзя; 1 — только для автотестов.
+    net_allow_private: bool = field(default_factory=lambda: os.getenv("NET_ALLOW_PRIVATE", "") == "1")
 
     @property
     def google_enabled(self) -> bool:
@@ -949,6 +967,8 @@ class Store:
         # 7) Страницы сканера, с которыми давно ничего не делали.
         for row in self.q("SELECT id FROM scan_pages WHERE created<?", now - s.tool_ttl_min * 60):
             self.remove_scan_page(row["id"])
+        # 9) Одноразовые ссылки: просроченные стираем, открытые — через сутки после открытия.
+        self.run("DELETE FROM secrets WHERE expires<? OR (opened IS NOT NULL AND opened<?)", now, now - DAY)
 
     def delete_owner_tools(self, owner: str) -> None:
         for row in self.q("SELECT * FROM tool_results WHERE owner=?", owner):
@@ -2895,6 +2915,172 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         endpoint = body.get("endpoint") if isinstance(body, dict) else None
         store.run("DELETE FROM push_subs WHERE endpoint=? AND owner=?", endpoint, owner)
         return {"ok": True}
+
+
+    # ------------------------------------------------------ для сисадмина (v2.3)
+    # Проверки сети делает наш сервер — это «взгляд снаружи». Доступно только тем, у кого есть аккаунт
+    # (владелец и добавленные им люди), не собеседникам-гостям. Подробности защиты — в app/nettools.py.
+
+    def net_user(request: Request) -> str:
+        who = tool_user(request)
+        if who.startswith("guest:"):
+            raise HTTPException(403, "Это доступно только пользователям с аккаунтом")
+        return who
+
+    async def net_body(request: Request) -> tuple[str, dict]:
+        who = net_user(request)
+        limiter.hit(f"net:{who}", 30, 60)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        return who, body
+
+    def localize(obj, lang: str):
+        """Ответ проверки — на языке человека (тексты проверок внутри — T-шаблоны)."""
+        if isinstance(obj, T):
+            return tr(obj, lang)
+        if isinstance(obj, dict):
+            return {k: localize(v, lang) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [localize(v, lang) for v in obj]
+        return obj
+
+    async def net_call(request: Request, coro):
+        try:
+            return localize(await coro, lang_of(request))
+        except nettools.NetError as exc:
+            raise HTTPException(400, exc.args[0])
+
+    store.net_resolve = nettools.default_resolve   # тесты подменяют DNS и WHOIS
+    store.net_transport = None
+
+    @app.post("/api/net/dns")
+    async def net_dns(request: Request):
+        _, body = await net_body(request)
+        return await net_call(request, nettools.dns_report(body.get("host"), store.net_resolve))
+
+    @app.post("/api/net/ssl")
+    async def net_ssl(request: Request):
+        _, body = await net_body(request)
+        return await net_call(request, nettools.ssl_report(body.get("host"), body.get("port") or 443, settings.net_allow_private))
+
+    @app.post("/api/net/ports")
+    async def net_ports(request: Request):
+        who, body = await net_body(request)
+        limiter.hit(f"net-ports:{who}", 60, 600)   # 60 проверок портов за 10 минут — это не сканер
+        return await net_call(request, nettools.ports_report(body.get("host"), body.get("ports"), settings.net_allow_private))
+
+    @app.post("/api/net/whois")
+    async def net_whois(request: Request):
+        who, body = await net_body(request)
+        limiter.hit(f"net-whois:{who}", 30, 600)
+        return await net_call(request, nettools.rdap(body.get("query"), store.net_transport))
+
+    @app.get("/api/net/me")
+    async def net_me(request: Request):
+        """Мой внешний IP — с какого адреса этот телефон/компьютер выходит в интернет."""
+        who = net_user(request)
+        limiter.hit(f"net:{who}", 30, 60)
+        ip = client_ip(request)
+        out = {"ip": ip, "version": 6 if ":" in ip else 4, "ptr": None, "whois": None}
+        try:
+            public = nettools.is_public(ip)
+        except ValueError:
+            public = False
+        if public:
+            out["ptr"] = await nettools.reverse_dns(ip)
+            try:
+                out["whois"] = await nettools.rdap(ip, store.net_transport)
+            except nettools.NetError:
+                pass
+        return out
+
+    @app.post("/api/net/wifi-qr")
+    async def net_wifi_qr(request: Request):
+        _, body = await net_body(request)
+        try:
+            text = nettools.wifi_qr_text(body.get("ssid"), body.get("password"), body.get("security"), body.get("hidden"))
+        except nettools.NetError as exc:
+            raise HTTPException(400, exc.args[0])
+        return {"svg": make_qr_svg(text)}
+
+    # ---------- одноразовая ссылка («прочитать один раз»)
+    # Шифрует браузер автора (AES-256-GCM), ключ — в части ссылки после «#», которую браузер на сервер
+    # не отправляет. Поэтому даже с базой сервера пароль прочитать нельзя.
+    SECRET_TTLS = (3600, DAY, 7 * DAY)
+    B64URL = re.compile(r"^[A-Za-z0-9_-]+$")
+
+    def secret_public(row: sqlite3.Row) -> dict:
+        return {"id": row["id"], "label": row["label"], "created": row["created"], "expires": row["expires"],
+                "opened": row["opened"]}
+
+    @app.post("/api/secrets")
+    async def secret_create(request: Request):
+        who, body = await net_body(request)
+        limiter.hit(f"secret-new:{who}", 30, 600)
+        iv, ct, ttl = body.get("iv"), body.get("ct"), body.get("ttl")
+        label = body.get("label") if isinstance(body.get("label"), str) else ""
+        if not (isinstance(iv, str) and len(iv) == 16 and B64URL.match(iv)
+                and isinstance(ct, str) and 24 <= len(ct) <= 40_000 and B64URL.match(ct)) or ttl not in SECRET_TTLS:
+            raise HTTPException(400, "Неверный запрос")
+        if store.one("SELECT COUNT(*) AS n FROM secrets WHERE owner=? AND opened IS NULL", who)["n"] >= 200:
+            raise HTTPException(429, "Слишком много неоткрытых ссылок — удали ненужные")
+        sid = secrets.token_urlsafe(12)
+        now = time.time()
+        store.run("INSERT INTO secrets (id, owner, label, iv, ct, notify, created, expires) VALUES (?,?,?,?,?,?,?,?)",
+                  sid, who, label.strip()[:60], iv, ct, 1 if body.get("notify", True) else 0, now, now + ttl)
+        return {"id": sid, "url": f"{base_url(request)}/k/{sid}", "expires": now + ttl}
+
+    @app.get("/api/secrets")
+    async def secret_list(request: Request):
+        who = net_user(request)
+        rows = store.q("SELECT * FROM secrets WHERE owner=? AND expires>? ORDER BY created DESC LIMIT 50",
+                       who, time.time())
+        return {"items": [secret_public(r) for r in rows]}
+
+    @app.delete("/api/secrets/{sid}")
+    async def secret_delete(sid: str, request: Request):
+        who = net_user(request)
+        store.run("DELETE FROM secrets WHERE id=? AND owner=?", sid, who)
+        return {"ok": True}
+
+    def live_secret(sid: str) -> sqlite3.Row:
+        row = store.one("SELECT * FROM secrets WHERE id=?", sid) if len(sid) <= 32 else None
+        if not row or row["opened"] or row["ct"] is None or row["expires"] < time.time():
+            raise HTTPException(404, "Ссылку уже открыли или срок её действия закончился")
+        return row
+
+    @app.get("/k/{sid}", include_in_schema=False)
+    async def secret_page(sid: str):
+        # Страница НЕ открывает секрет сама: это делает кнопка (POST). Так превью ссылок в мессенджерах
+        # не «съедят» одноразовую ссылку.
+        return FileResponse(STATIC_DIR / "secret.html")
+
+    @app.get("/api/secrets/{sid}/status")
+    async def secret_status(sid: str, request: Request):
+        limiter.hit(f"secret-open:{client_ip(request)}", 60, 600)
+        row = live_secret(sid)
+        return {"ok": True, "expires": row["expires"]}
+
+    @app.post("/api/secrets/{sid}/open")
+    async def secret_open(sid: str, request: Request):
+        check_origin(request.headers)   # открыть может кто угодно со ссылкой — но только с нашего сайта
+        limiter.hit(f"secret-open:{client_ip(request)}", 60, 600)
+        row = live_secret(sid)
+        # Атомарно: два одновременных открытия не получат секрет оба.
+        if store.run("UPDATE secrets SET iv=NULL, ct=NULL, opened=? WHERE id=? AND opened IS NULL",
+                     time.time(), sid) != 1:
+            raise HTTPException(404, "Ссылку уже открыли или срок её действия закончился")
+        if row["notify"]:
+            label = row["label"] or T("без названия")
+            store.push(row["owner"], {"title": T("Одноразовую ссылку открыли"),
+                                      "body": T("«{label}» — прочитано, ссылка больше не работает", label=label),
+                                      "url": "/chat" if row["owner"].startswith("acc:") else "/",
+                                      "tag": f"secret-{sid}"})
+        return {"iv": row["iv"], "ct": row["ct"]}
 
     # ------------------------------------------------------------ звонки (v2.1)
     # Звонить можно в чатах с людьми (как в WhatsApp). Себе на свой компьютер не звонят — там чат для файлов.

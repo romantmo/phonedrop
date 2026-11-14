@@ -342,3 +342,89 @@
 .sg-size { display: flex; align-items: center; gap: 12px; font-size: 14px; color: var(--muted); }
 .sg-size input { flex: 1; }
 #toolFiles.still .tf-item, #toolFiles.still .page-card { animation: none; }
+
+/* ---------- v2.3: «🧰 Для сисадмина» */
+.tools-group { margin: 26px 4px 12px; font-size: 18px; }
+.tool-custom { display: flex; flex-direction: column; gap: 14px; }
+.sys-form { display: flex; flex-direction: column; gap: 10px; }
+.sys-form .seg { margin-top: 0; }
+.sys-field { display: flex; flex-direction: column; min-width: 0; }
+.sys-pair { display: grid; grid-template-columns: 1fr 96px; gap: 10px; }
+.sys-textarea { resize: vertical; min-height: 110px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; }
+.sys-out { display: flex; flex-direction: column; gap: 10px; }
+.sys-out:empty { display: none; }
+.sys-out h3 { margin: 6px 2px 0; font-size: 18px; overflow-wrap: anywhere; }
+.tool-custom h4 { margin: 10px 2px 0; font-size: 15px; color: var(--muted); font-weight: 600; }
+.sys-wait { color: var(--muted); margin: 4px 2px; }
+.sys-error { color: var(--danger); margin: 4px 2px; }
+.sys-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sys-checks li {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 14px;
+  background: var(--panel); border: 1px solid var(--line); line-height: 1.35; overflow-wrap: anywhere;
+}
+.sys-checks li.sys-bad { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.sys-checks li.sys-warn { border-color: color-mix(in srgb, #e3a008 50%, var(--line)); }
+.sys-ico { flex-shrink: 0; width: 1.4em; text-align: center; }
+.sys-kv {
+  display: grid; grid-template-columns: minmax(0, 42%) minmax(0, 1fr); gap: 6px 12px; margin: 0;
+  padding: 12px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line);
+}
+.sys-kv dt { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; hyphens: auto; }
+.sys-kv dd { margin: 0; overflow-wrap: anywhere; font-size: 15px; }
+.sys-recs { display: flex; flex-direction: column; gap: 8px; }
+.sys-rec { display: flex; flex-direction: column; gap: 4px; }
+.sys-rec b { font-size: 13px; color: var(--muted); margin: 0 2px; }
+.sys-copy {
+  display: block; width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); color: var(--ink); text-align: start; cursor: pointer;
+  font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.sys-copy:active { background: var(--accent-soft); }
+.sys-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+  color: var(--ink); font: inherit; font-size: 14px; cursor: pointer;
+}
+.chip:active { background: var(--accent-soft); }
+.sys-form > .chip { align-self: flex-start; }
+.sys-range { width: 100%; accent-color: var(--accent); }
+.sys-checks-row { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.sys-check { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; cursor: pointer; }
+.sys-check input { width: 20px; height: 20px; accent-color: var(--accent); }
+.sys-hops { margin: 0; padding-inline-start: 26px; display: flex; flex-direction: column; gap: 8px; }
+.sys-hops li { padding: 8px 10px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); overflow-wrap: anywhere; font-size: 14px; }
+.sys-hops li.slow { border-color: color-mix(in srgb, #e3a008 50%, var(--line)); }
+.sys-hop-meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.sys-secret { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
+.sys-secret-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sys-secret-text span { color: var(--muted); font-size: 13px; }
+
+/* QR-код Wi-Fi: карточка, которую можно распечатать */
+.wifi-card {
+  align-self: center; width: min(320px, 100%); padding: 20px; border-radius: 20px; background: #fff; color: #111;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; border: 1px solid var(--line); text-align: center;
+}
+.wifi-title { font-size: 22px; font-weight: 700; }
+.wifi-qr { width: 100%; max-width: 260px; height: auto; image-rendering: pixelated; }
+.wifi-name { font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
+.wifi-pass { font: 17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.wifi-hint { font-size: 13px; color: #555; }
+@media print {
+  body.print-wifi * { visibility: hidden !important; }
+  body.print-wifi .wifi-card.printing, body.print-wifi .wifi-card.printing * { visibility: visible !important; }
+  body.print-wifi .wifi-card.printing { position: fixed; top: 20mm; left: 50%; transform: translateX(-50%); width: 120mm; border: 2px solid #111; }
+}
+
+/* ---------- страница одноразовой ссылки */
+.secret-page { min-height: 100dvh; display: grid; place-items: center; padding: 20px; background: var(--wall); }
+.secret-box {
+  width: min(520px, 100%); padding: 26px 22px; border-radius: 24px; background: var(--panel);
+  border: 1px solid var(--line); display: flex; flex-direction: column; gap: 14px; box-shadow: var(--shadow);
+}
+.secret-box h1 { margin: 0; font-size: 22px; }
+.secret-box p { margin: 0; color: var(--muted); }
+.secret-text {
+  margin: 0; padding: 14px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line);
+  font: 16px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 50vh; overflow: auto; user-select: all;
+}

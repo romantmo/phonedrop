@@ -4,6 +4,8 @@ python-multipart==0.0.32
 qrcode==8.2
 pywebpush==2.5.0
 httpx==0.28.1
+# v2.3: проверки DNS для сисадмина
+dnspython==2.9.2
 # конвертер файлов
 pillow==13.0.0
 pillow-heif==1.8.1
