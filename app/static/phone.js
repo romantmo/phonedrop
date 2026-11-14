@@ -220,7 +220,11 @@
   }
 
   // ---------- события с сервера
+  // Звонок в чате с человеком, пока открыт список чатов: «Ответить» откроет этот чат.
+  PDCall.init({ role: ROLE, room: () => null });
+
   function onEvent(msg) {
+    if (msg.type && msg.type.startsWith("call_")) return PDCall.event(msg);
     if (msg.type === "message") {
       if (msg.chat_id === openId) markRead();
       else reloadSoon();

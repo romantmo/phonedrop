@@ -1,12 +1,14 @@
 # compose.yaml — инструкция для сервера: какие «коробки» запускать и как их соединить.
 # Запуск: docker compose up -d   (в папке /opt/phonedrop на сервере)
 #
-# Три коробки:
+# Четыре коробки:
 #   app       — наше приложение PhoneDrop (берётся из хранилища GitHub);
 #   converter — конвертер файлов (тот же образ, другая команда). Сидит во внутренней
 #               сети без интернета, не видит базу и переписки, ограничен по памяти;
 #   caddy     — «привратник»: принимает посетителей из интернета, сам получает
-#               HTTPS-сертификат (замочек) и передаёт запросы приложению.
+#               HTTPS-сертификат (замочек) и передаёт запросы приложению;
+#   turn      — TURN-сервер для звонков (coturn): пересылает звук и видео, когда телефоны
+#               не могут соединиться напрямую. Разговор зашифрован, coturn его не видит.
 
 services:
   app:
@@ -70,6 +72,52 @@ services:
       - caddy-config:/config
     depends_on:
       - app
+
+  turn:
+    image: coturn/coturn:4-alpine        # официальный образ; работает от пользователя nobody
+    restart: unless-stopped
+    # Сеть сервера напрямую: coturn нужен диапазон портов, Docker с ним работает плохо.
+    # Порты в файрволе Hetzner: 3478 TCP+UDP и 49160-49200 UDP.
+    network_mode: host
+    env_file:
+      - path: .env                       # TURN_SECRET — общий секрет с приложением (только на сервере)
+        required: false
+    read_only: true
+    tmpfs:
+      - /var/lib/coturn
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -z "$$TURN_SECRET" ]; then
+          echo "TURN_SECRET не задан в /opt/phonedrop/.env — TURN выключен, звонки только напрямую"
+          while true; do sleep 3600; done
+        fi
+        exec turnserver -n --log-file=stdout --no-cli --no-tls --no-dtls \
+          --listening-port=3478 --min-port=49160 --max-port=49200 \
+          --use-auth-secret --static-auth-secret="$$TURN_SECRET" --realm=drop.rbgen.com \
+          --fingerprint --no-software-attribute --stale-nonce=600 \
+          --user-quota=12 --total-quota=100 --max-bps=3000000 \
+          --no-multicast-peers \
+          --denied-peer-ip=0.0.0.0-0.255.255.255 \
+          --denied-peer-ip=10.0.0.0-10.255.255.255 \
+          --denied-peer-ip=100.64.0.0-100.127.255.255 \
+          --denied-peer-ip=127.0.0.0-127.255.255.255 \
+          --denied-peer-ip=169.254.0.0-169.254.255.255 \
+          --denied-peer-ip=172.16.0.0-172.31.255.255 \
+          --denied-peer-ip=192.0.0.0-192.0.0.255 \
+          --denied-peer-ip=192.168.0.0-192.168.255.255 \
+          --denied-peer-ip=198.18.0.0-198.19.255.255 \
+          --denied-peer-ip=240.0.0.0-255.255.255.255 \
+          --denied-peer-ip=::1 \
+          --denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255 \
+          --denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff \
+          --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff \
+          --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+        # denied-peer-ip: через TURN нельзя достучаться до внутренних адресов сервера и сетей Docker.
 
 networks:
   convert:

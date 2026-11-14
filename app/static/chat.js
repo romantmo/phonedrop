@@ -761,6 +761,8 @@ window.PD = (() => {
       open: (url) => { location.href = url; },
       // Пришло от service worker: push по сообщению, пока приложение открыто.
       handle(data) {
+        // Входящий звонок уже на экране (звонит своей мелодией) — баннер не нужен.
+        if (String(data.tag || "").startsWith("call-") && window.PDCall && window.PDCall.busy()) return;
         if (api_.isCurrent(data)) return play("soft");
         if (!data.system) banner(data);  // на iPhone система уже показала своё уведомление
         play("alert");

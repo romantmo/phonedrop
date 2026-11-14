@@ -306,6 +306,14 @@ class Settings:
     allowed_emails: set = field(default_factory=lambda: {
         e.strip().lower() for e in os.getenv("ALLOWED_EMAILS", "").split(",") if e.strip()})
 
+    # Звонки (v2.1): TURN-сервер coturn пересылает звук и видео, если браузеры не видят друг друга напрямую.
+    # Секрет общий с coturn (--static-auth-secret), лежит только в .env на сервере. Нет секрета — звонки
+    # всё равно работают, но только когда устройства могут соединиться напрямую (например, одна Wi-Fi сеть).
+    turn_secret: str = field(default_factory=lambda: os.getenv("TURN_SECRET", ""))
+    turn_host: str = field(default_factory=lambda: os.getenv("TURN_HOST", ""))
+    turn_port: int = field(default_factory=lambda: _env_int("TURN_PORT", 3478))
+    call_ring_sec: int = field(default_factory=lambda: _env_int("CALL_RING_SEC", 45))
+
     @property
     def google_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
@@ -344,6 +352,8 @@ class Store:
         self.vapid_public = ""
         self.push_sender = self._send_webpush
         self.push_tasks: set[asyncio.Task] = set()
+        self.calls: dict[str, dict] = {}            # идущие звонки — только в памяти, в базу не пишем
+        self.call_tasks: set[asyncio.Task] = set()  # таймеры «никто не ответил»
 
     # ---------- запуск
     def open(self) -> None:
@@ -759,6 +769,8 @@ class Store:
 
     async def close_room(self, rid: str, reason: str) -> None:
         room = self.one("SELECT * FROM rooms WHERE id=?", rid)
+        for cid in [c for c, call in self.calls.items() if call["chat_id"] == rid]:
+            self.calls.pop(cid, None)  # чат закрыли посреди звонка — звонок тоже заканчивается
         await self.kick_room(rid, None, reason)
         self.room_sockets.pop(rid, None)
         self.delete_room(rid)
@@ -1057,6 +1069,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = asyncio.create_task(cleanup_loop())
         yield
         task.cancel()
+        for t in list(store.call_tasks):
+            t.cancel()
         await store.flush_push()
         store.close()
 
@@ -2847,6 +2861,194 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body = await request.json()
         endpoint = body.get("endpoint") if isinstance(body, dict) else None
         store.run("DELETE FROM push_subs WHERE endpoint=? AND owner=?", endpoint, owner)
+        return {"ok": True}
+
+    # ------------------------------------------------------------ звонки (v2.1)
+    # Звонить можно в чатах с людьми (как в WhatsApp). Себе на свой компьютер не звонят — там чат для файлов.
+    # Звук и видео идут напрямую между браузерами (WebRTC). Сервер только «знакомит» их:
+    # передаёт предложение (offer) и ответ (answer), будит собеседника push-уведомлением
+    # и выдаёт временный ключ к TURN-серверу — тот пересылает звонок, если напрямую не выходит.
+    # Сам разговор через приложение не проходит и нигде не сохраняется.
+
+    CALL_SDP_MAX = 64 * 1024
+    TURN_TTL = 12 * 3600
+    OTHER_SIDE = {"owner": "guest", "guest": "owner"}
+    END_REASONS = ("hangup", "decline", "busy", "failed", "cancel")
+
+    def phone_account(cookies) -> sqlite3.Row | None:
+        acc = store.account_by_token(cookies.get(PHONE_COOKIE))
+        if acc and acc["email"] and settings.google_enabled and not store.email_allowed(acc["email"]):
+            return None
+        return acc
+
+    def call_chat(request: Request, chat_id) -> tuple[sqlite3.Row, str]:
+        """Чат с человеком и сторона того, кто звонит или отвечает: "owner" (создатель чата) или "guest"."""
+        role_of(request)
+        room = store.one("SELECT * FROM rooms WHERE id=?", chat_id) if isinstance(chat_id, str) else None
+        side = room_side(room, request.cookies) if room else None
+        if not side:
+            raise HTTPException(404, "Чат не найден")
+        return room, side
+
+    def call_of(cid: str, request: Request) -> tuple[dict, str]:
+        call = store.calls.get(cid)
+        if not call:
+            raise HTTPException(404, "Звонок уже закончился")
+        _, side = call_chat(request, call["chat_id"])
+        return call, side
+
+    def call_peer(call: dict, side: str) -> tuple[str | None, str]:
+        """Как «side» видит собеседника: имя и адрес чата."""
+        room = store.one("SELECT * FROM rooms WHERE id=?", call["chat_id"])
+        name = (room["title"] if side == "owner" else room["owner_name"]) if room else None
+        return name, f"/room/{call['chat_id']}"
+
+    def call_public(call: dict, side: str) -> dict:
+        name, url = call_peer(call, side)
+        return {"id": call["id"], "chat_id": call["chat_id"], "video": call["video"],
+                "state": call["state"], "incoming": call["callee"] == side, "name": name, "url": url,
+                "created": call["created"]}
+
+    async def to_call_side(call: dict, side: str, message: dict) -> None:
+        room = store.one("SELECT * FROM rooms WHERE id=?", call["chat_id"])
+        if not room:
+            return
+        await store.to_room(room["id"], message, side=side)
+        if side == "owner":  # создатель может быть в списке чатов, а не в самом чате
+            await store.send_ws(store.phone_sockets.get(room["account_id"], set()), message)
+
+    def push_call(call: dict, missed: bool) -> None:
+        name, url = call_peer(call, call["callee"])
+        title = (T("📞 Пропущенный звонок") if missed else
+                 T("🎥 Входящий видеозвонок") if call["video"] else T("📞 Входящий звонок"))
+        payload = {"title": title, "body": name or "PhoneDrop", "url": url, "tag": f"call-{call['id']}"}
+        room = store.one("SELECT * FROM rooms WHERE id=?", call["chat_id"])
+        if room and call["callee"] == "owner":
+            push_room_owner(room, payload)
+        elif room and room["guest_hash"]:
+            store.push(f"guest:{room['guest_hash']}", payload)
+
+    async def end_call(cid: str, reason: str, by: str | None = None) -> None:
+        call = store.calls.pop(cid, None)
+        if not call:
+            return
+        message = {"type": "call_end", "id": cid, "reason": reason, "by": by}
+        await to_call_side(call, call["caller"], message)
+        await to_call_side(call, call["callee"], message)
+        if call["state"] == "ringing" and reason in ("missed", "cancel"):
+            push_call(call, missed=True)
+
+    async def ring_timeout(cid: str) -> None:
+        await asyncio.sleep(settings.call_ring_sec)
+        call = store.calls.get(cid)
+        if call and call["state"] == "ringing":
+            await end_call(cid, "missed")
+
+    async def call_body(request: Request) -> dict:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Неверный запрос")
+        return body
+
+    def valid_sdp(sdp) -> str:
+        if not isinstance(sdp, str) or not sdp.startswith("v=0") or len(sdp) > CALL_SDP_MAX:
+            raise HTTPException(400, "Неверный запрос")
+        return sdp
+
+    @app.get("/api/calls/ice")
+    async def call_ice(request: Request):
+        """Адреса STUN/TURN и временный (12 ч) ключ к нашему TURN-серверу — только своим."""
+        role_of(request)
+        dev = store.device_by_token(request.cookies.get(PC_COOKIE))
+        acc = phone_account(request.cookies)
+        who = (f"dev:{dev['id']}" if dev and dev["account_id"] else
+               f"acc:{acc['id']}" if acc else f"guest:{g}" if (g := guest_key(request)) else None)
+        if not who:
+            raise not_linked
+        limiter.hit(f"ice:{who}", 60, 600)
+        if not settings.turn_secret:
+            return {"ice_servers": []}
+        host = settings.turn_host or urlsplit(settings.public_url).hostname or "localhost"
+        port = settings.turn_port
+        # Схема «TURN REST API»: имя = срок годности + метка, пароль = HMAC от имени общим секретом.
+        user = f"{int(time.time()) + TURN_TTL}:{hashlib.sha256(who.encode()).hexdigest()[:16]}"
+        password = base64.b64encode(hmac.new(settings.turn_secret.encode(), user.encode(), hashlib.sha1).digest()).decode()
+        return {"ice_servers": [
+            {"urls": [f"stun:{host}:{port}"]},
+            {"urls": [f"turn:{host}:{port}?transport=udp", f"turn:{host}:{port}?transport=tcp"],
+             "username": user, "credential": password},
+        ]}
+
+    @app.post("/api/calls")
+    async def call_start(request: Request):
+        body = await call_body(request)
+        chat_id = body.get("chat_id")
+        room, side = call_chat(request, chat_id)
+        limiter.hit(f"call:{chat_id}", 20, 600)
+        sdp = valid_sdp(body.get("sdp"))
+        if not room["guest_hash"]:
+            raise HTTPException(409, "Собеседник ещё не вошёл в чат — сначала отправь ему код")
+        if any(c["chat_id"] == chat_id for c in store.calls.values()):
+            raise HTTPException(409, "В этом чате уже идёт звонок")
+        call = {"id": uuid.uuid4().hex, "chat_id": chat_id, "video": bool(body.get("video")),
+                "caller": side, "callee": OTHER_SIDE[side], "offer": sdp, "state": "ringing",
+                "created": time.time()}
+        store.calls[call["id"]] = call
+        await to_call_side(call, call["callee"], {"type": "call_ring", "call": call_public(call, call["callee"])})
+        push_call(call, missed=False)
+        task = asyncio.create_task(ring_timeout(call["id"]))
+        store.call_tasks.add(task)
+        task.add_done_callback(store.call_tasks.discard)
+        return {"call": call_public(call, side)}
+
+    @app.get("/api/calls/pending")
+    async def calls_pending(request: Request):
+        """Звонки, которые сейчас звонят мне (страница открылась по уведомлению — показать «Ответить»)."""
+        role_of(request)
+        found = []
+        for call in list(store.calls.values()):
+            if call["state"] != "ringing":
+                continue
+            try:
+                _, side = call_chat(request, call["chat_id"])
+            except HTTPException:
+                continue
+            if side == call["callee"]:
+                found.append(call_public(call, side))
+        return {"calls": found}
+
+    @app.get("/api/calls/{cid}")
+    async def call_get(cid: str, request: Request):
+        call, side = call_of(cid, request)
+        data = {"call": call_public(call, side)}
+        if side == call["callee"] and call["state"] == "ringing":
+            data["sdp"] = call["offer"]
+        return data
+
+    @app.post("/api/calls/{cid}/answer")
+    async def call_answer(cid: str, request: Request):
+        call, side = call_of(cid, request)
+        sdp = valid_sdp((await call_body(request)).get("sdp"))
+        if side != call["callee"]:
+            raise HTTPException(403, "Это действие недоступно")
+        if call["state"] != "ringing":
+            raise HTTPException(409, "На звонок уже ответили на другом устройстве")
+        call.update(state="active", answered=time.time())
+        await to_call_side(call, call["caller"], {"type": "call_answer", "id": cid, "sdp": sdp})
+        await to_call_side(call, call["callee"], {"type": "call_taken", "id": cid})
+        return {"ok": True}
+
+    @app.post("/api/calls/{cid}/end")
+    async def call_end(cid: str, request: Request):
+        call, side = call_of(cid, request)
+        reason = (await call_body(request)).get("reason")
+        reason = reason if reason in END_REASONS else "hangup"
+        if call["state"] == "ringing" and side == call["caller"]:
+            reason = "cancel"
+        await end_call(cid, reason, by=side)
         return {"ok": True}
 
     # ------------------------------------------------------------ WebSocket

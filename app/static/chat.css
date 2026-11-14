@@ -370,3 +370,59 @@ a { color: var(--link); }
 [dir="rtl"] #backBtn svg, [dir="rtl"] #actionBtn svg, [dir="rtl"] .flip-rtl { transform: scaleX(-1); }
 [dir="rtl"] .msg.out { transform-origin: left bottom; }
 [dir="rtl"] .msg.in { transform-origin: right bottom; }
+
+/* ---------- звонок (v2.1): на весь экран, тёмный фон, кнопки внизу */
+body.in-call { overflow: hidden; }
+.call-ov {
+  position: fixed; inset: 0; z-index: 90; overflow: hidden;
+  background: radial-gradient(120% 80% at 50% 20%, #2b3550, #0d111b 70%); color: #fff;
+  display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+  padding: calc(48px + env(safe-area-inset-top)) 16px calc(28px + env(safe-area-inset-bottom));
+}
+.call-remote {
+  position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000;
+  opacity: 0; transition: opacity .3s; pointer-events: none;
+}
+.call-ov.peer-video .call-remote { opacity: 1; }
+.call-local {
+  position: absolute; z-index: 2; width: 28vw; max-width: 200px; aspect-ratio: 3 / 4; object-fit: cover;
+  inset-inline-end: 14px; top: calc(14px + env(safe-area-inset-top));
+  border-radius: 16px; background: #222; box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
+}
+.call-local.mirror { transform: scaleX(-1); }
+.call-info { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+.call-ov.peer-video .call-info { flex-direction: row; gap: 10px; align-self: flex-start; text-shadow: 0 1px 4px rgba(0, 0, 0, .7); }
+.call-avatar {
+  display: grid; place-items: center; width: 112px; height: 112px; border-radius: 50%;
+  background: linear-gradient(135deg, #8b5cf6, #2dd4bf); font-size: 46px; font-weight: 700;
+  box-shadow: 0 0 0 10px rgba(255, 255, 255, .06), 0 0 0 22px rgba(255, 255, 255, .03);
+}
+.call-ov[data-state="incoming"] .call-avatar, .call-ov[data-state="calling"] .call-avatar { animation: call-pulse 1.6s ease-in-out infinite; }
+@keyframes call-pulse { 50% { box-shadow: 0 0 0 16px rgba(255, 255, 255, .08), 0 0 0 32px rgba(255, 255, 255, .03); } }
+.call-ov.peer-video .call-avatar { display: none; }
+.call-name { font-size: 26px; font-weight: 700; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call-status { font-size: 16px; color: rgba(255, 255, 255, .75); font-variant-numeric: tabular-nums; }
+.call-actions { position: relative; z-index: 2; display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+.call-ov[data-state="incoming"] .call-actions { gap: 72px; }
+.call-btn {
+  display: grid; place-items: center; width: 62px; height: 62px; border: 0; border-radius: 50%;
+  background: rgba(255, 255, 255, .16); color: #fff; cursor: pointer; backdrop-filter: blur(8px);
+  -webkit-tap-highlight-color: transparent; transition: transform .1s, background .2s;
+}
+.call-btn:active { transform: scale(.93); }
+.call-btn svg { width: 28px; height: 28px; }
+.call-btn.off { background: #fff; color: #1d2433; }
+.call-btn.on { background: #2dd4bf; color: #0d111b; }
+.call-btn.red { background: #ef4444; }
+.call-btn.green { background: #22c55e; animation: call-shake 1.2s ease-in-out infinite; }
+.call-btn.red svg { transform: none; }
+@keyframes call-shake { 0%, 60%, 100% { transform: rotate(0); } 70% { transform: rotate(-12deg); } 80% { transform: rotate(12deg); } 90% { transform: rotate(-6deg); } }
+.call-unmute {
+  position: relative; z-index: 2; padding: 12px 18px; border: 0; border-radius: 14px;
+  background: #fff; color: #1d2433; font: inherit; font-weight: 600; cursor: pointer;
+}
+/* кнопки звонка в шапке чата */
+.chat-head .icon-btn.call-start { flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .call-ov .call-avatar, .call-btn.green { animation: none !important; }
+}

@@ -220,6 +220,11 @@
     }
   }
 
+  // ---------- звонки: 📞 и 🎥 в шапке
+  PDCall.init({ role: ROLE, room: () => (room ? { id: rid, name: room.title, joined: room.joined } : null) });
+  $("callAudioBtn").addEventListener("click", () => PDCall.start(false));
+  $("callVideoBtn").addEventListener("click", () => PDCall.start(true));
+
   const chat = new RoomChat({
     role: ROLE,
     mobile,
@@ -231,6 +236,7 @@
   });
 
   function onClosed(reason) {
+    PDCall.drop();
     chat.stop();
     sessionStorage.removeItem("pd-inv-" + rid);
     const texts = {
@@ -253,6 +259,8 @@
     else text = room.peer_online ? tx("в сети") : tx("не в сети");
     $("roomStatus").textContent = text;
     $("avatar").classList.toggle("online", !!room.peer_online && room.joined);
+    // Звонить можно, когда собеседник уже вошёл в чат (иначе звонить некому).
+    $("callAudioBtn").hidden = $("callVideoBtn").hidden = !(PDCall.supported && room.joined);
   }
 
   function setHeader() {
@@ -351,6 +359,7 @@
     }
     renderInvite(false);
     renderPushBanner();
+    if (first) PDCall.checkPending();  // открыли по уведомлению «Входящий звонок»
   }
 
   function markRead() {
@@ -361,6 +370,7 @@
   document.addEventListener("visibilitychange", markRead);
 
   function onEvent(msg) {
+    if (msg.type && msg.type.startsWith("call_")) return PDCall.event(msg);
     if (!room) return;
     if (msg.type === "message" && msg.message.sender !== room.me) {
       markRead();
