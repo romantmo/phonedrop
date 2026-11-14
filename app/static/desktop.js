@@ -16,7 +16,7 @@
     onEvent,
     onClosed,
     onResync: resync,
-    onConnection: (ok) => { if (!ok) setPeer("нет связи с сервером…"); },
+    onConnection: (ok) => { if (!ok) setPeer(tx("нет связи с сервером…")); },
   });
 
   const setPeer = (text) => ($("peerStatus").textContent = text);
@@ -34,8 +34,8 @@
     else if (!settingsFolded) { settingsFolded = true; $("settingsBox").open = false; }
     const place = state.device.place || "";
     for (const b of document.querySelectorAll("#placeSeg button")) b.classList.toggle("on", b.dataset.place === place);
-    $("setSummary").textContent = [state.device.label, remember ? "🔒 постоянный" : "⏳ временный",
-      place === "home" ? "🏠 дом" : place === "work" ? "🏢 работа" : ""].filter(Boolean).join(" · ");
+    $("setSummary").textContent = [state.device.label, remember ? tx("🔒 постоянный") : tx("⏳ временный"),
+      place === "home" ? tx("🏠 дом") : place === "work" ? tx("🏢 работа") : ""].filter(Boolean).join(" · ");
     $("tabs").hidden = !linked;  // чаты и инструменты — только для подключённого к телефону компьютера
     if (!linked) { showSection("chat"); selectChat("phone"); }
     $("chatsCard").hidden = !linked || section !== "chat";
@@ -46,16 +46,16 @@
     }
     for (const radio of document.querySelectorAll("input[name=mode]")) radio.checked = radio.value === state.device.mode;
     $("rememberHint").textContent =
-      `Запомнить компьютер. Переписка сохраняется, файлы хранятся ${state.file_ttl_days} дней. Для своих компьютеров — дома или на работе`;
+      tx("Запомнить компьютер. Переписка сохраняется, файлы хранятся {0} дней. Для своих компьютеров — дома или на работе", state.file_ttl_days);
     $("noteText").textContent = remember
-      ? "🔒 Любой, кто сядет за этот компьютер, увидит переписку. Отключить можно кнопкой ниже или с телефона."
-      : "⏳ Когда закроешь вкладку, через минуту переписка и файлы удалятся с сервера. Скачанные файлы остаются в «Загрузках» — на чужом компьютере удаляй их сам.";
+      ? tx("🔒 Любой, кто сядет за этот компьютер, увидит переписку. Отключить можно кнопкой ниже или с телефона.")
+      : tx("⏳ Когда закроешь вкладку, через минуту переписка и файлы удалятся с сервера. Скачанные файлы остаются в «Загрузках» — на чужом компьютере удаляй их сам.");
     $("emptyIcon").textContent = linked ? "💬" : "📷";
-    $("emptyTitle").textContent = linked ? "Пока пусто" : "Отсканируй QR-код слева";
+    $("emptyTitle").textContent = linked ? tx("Пока пусто") : tx("Отсканируй QR-код слева");
     $("emptyText").textContent = linked
-      ? "Отправь с телефона фото, файл, текст или голосовое. Отсюда тоже можно: перетащи файл в окно или нажми Ctrl+V."
-      : "Наведи камеру телефона на код — и можно переписываться.";
-    setPeer(!linked ? "не подключён" : state.phone_online ? "в сети" : "не в сети — сообщения дождутся");
+      ? tx("Отправь с телефона фото, файл, текст или голосовое. Отсюда тоже можно: перетащи файл в окно или нажми Ctrl+V.")
+      : tx("Наведи камеру телефона на код — и можно переписываться.");
+    setPeer(!linked ? tx("не подключён") : state.phone_online ? tx("в сети") : tx("не в сети — сообщения дождутся"));
     renderPush();
   }
 
@@ -65,8 +65,8 @@
     $("pushBtn").hidden = !show || status !== "default";
     $("pushText").hidden = !show || status === "default";
     $("pushText").textContent = status === "granted"
-      ? "🔔 Уведомления включены — придут, даже когда вкладка свёрнута."
-      : "🔕 Уведомления запрещены в браузере. Разреши их через значок замка в адресной строке.";
+      ? tx("🔔 Уведомления включены — придут, даже когда вкладка свёрнута.")
+      : tx("🔕 Уведомления запрещены в браузере. Разреши их через значок замка в адресной строке.");
   }
 
   function showPair(pair) {
@@ -76,7 +76,7 @@
     const until = Date.now() + pair.expires_in * 1000;
     const tick = () => {
       const left = Math.max(0, Math.round((until - Date.now()) / 1000));
-      $("pairExpires").textContent = `Код действует ещё ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+      $("pairExpires").textContent = tx("Код действует ещё {0}:{1}", Math.floor(left / 60), String(left % 60).padStart(2, "0"));
       if (left === 0) {
         clearInterval(pairTimer);
         newPairCode(); // пока телефон не подключён — код обновляется сам
@@ -131,7 +131,7 @@
 
   function onEvent(msg) {
     if (msg.type === "linked") {
-      toast("Телефон подключён");
+      toast(tx("Телефон подключён"));
       start();
     } else if (msg.type === "transfers_changed") {
       PDPcChat.refresh();
@@ -139,7 +139,7 @@
       PDPeople.refreshSoon();
     } else if (msg.type === "relinked") {
       closeRelink();
-      toast("Телефон переподключён — все чаты на нём");
+      toast(tx("Телефон переподключён — все чаты на нём"));
     } else if (msg.type === "presence") {
       state.phone_online = msg.phone_online;
       render();
@@ -156,10 +156,10 @@
     chat.stop();
     clearInterval(pairTimer);
     const texts = {
-      phone_removed: "Телефон отключил этот компьютер — переписка удалена",
-      expired: "Компьютер долго не использовался и был отключён",
-      reattached: "Готово — переписка восстановлена",
-      moved: "Этот чат открыли в другом браузере — здесь он отключён",
+      phone_removed: tx("Телефон отключил этот компьютер — переписка удалена"),
+      expired: tx("Компьютер долго не использовался и был отключён"),
+      reattached: tx("Готово — переписка восстановлена"),
+      moved: tx("Этот чат открыли в другом браузере — здесь он отключён"),
     };
     if (texts[reason]) toast(texts[reason]);
     start();
@@ -176,7 +176,7 @@
           body: JSON.stringify({ mode: radio.value }),
         });
         state.device.mode = radio.value;
-        toast(radio.value === "remember" ? "Компьютер запомнен" : "Переписка удалится после закрытия вкладки");
+        toast(radio.value === "remember" ? tx("Компьютер запомнен") : tx("Переписка удалится после закрытия вкладки"));
       } catch (e) {
         toast(e.message, true);
       }
@@ -200,7 +200,7 @@
       });
       state.device.label = label;
       nameInput.blur();
-      toast("Название сохранено");
+      toast(tx("Название сохранено"));
     } catch (e) {
       toast(e.message, true);
     }
@@ -230,7 +230,7 @@
   $("pushBtn").addEventListener("click", async () => {
     try {
       await push.enable(ROLE, state.vapid_key);
-      toast("Уведомления включены");
+      toast(tx("Уведомления включены"));
     } catch (e) {
       toast(e.message, true);
     }
@@ -291,30 +291,30 @@
     svg.innerHTML = '<rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
     return svg;
   };
-  const PLACES = [["home", "🏠 Дом"], ["work", "🏢 Работа"], ["", "💻 Другие компьютеры"]];
+  const PLACES = [["home", tx("🏠 Дом")], ["work", tx("🏢 Работа")], ["", tx("💻 Другие компьютеры")]];
   function renderChats() {
     if (!state || !state.linked) return;
     const pcs = PDPcChat.devices();
     const rooms = PDPeople.rooms();
     const items = [
-      el("div", { class: "pc-sec" }, "Телефон"),
-      row({ on: target === "phone", onclick: () => selectChat("phone") }, phoneIco(), "Мой телефон",
-        state.phone_online ? "в сети" : "не в сети", state.phone_online),
+      el("div", { class: "pc-sec" }, tx("Телефон")),
+      row({ on: target === "phone", onclick: () => selectChat("phone") }, phoneIco(), tx("Мой телефон"),
+        state.phone_online ? tx("в сети") : tx("не в сети"), state.phone_online),
     ];
     if (!pcs.length) {
-      items.push(el("div", { class: "pc-sec" }, "💻 Мои компьютеры"),
-        el("p", { class: "pc-hint" }, "Открой PhoneDrop на другом компьютере и подключи тем же телефоном — сможешь кидать файлы до 10 ГБ."));
+      items.push(el("div", { class: "pc-sec" }, tx("💻 Мои компьютеры")),
+        el("p", { class: "pc-hint" }, tx("Открой PhoneDrop на другом компьютере и подключи тем же телефоном — сможешь кидать файлы до 10 ГБ.")));
     }
     const groups = PLACES.filter(([key]) => pcs.some((d) => (d.place || "") === key));
     for (const [key, title] of groups) {
-      items.push(el("div", { class: "pc-sec" }, groups.length === 1 && !key ? "💻 Мои компьютеры" : title));
+      items.push(el("div", { class: "pc-sec" }, groups.length === 1 && !key ? tx("💻 Мои компьютеры") : title));
       for (const d of pcs.filter((x) => (x.place || "") === key)) {
         items.push(row({ on: target === d.id, onclick: () => selectChat(d.id) }, monitorIco(), d.label,
-          d.online ? "в сети" : "не в сети", d.online, PDPcChat.unread(d.id) ? "•" : ""));
+          d.online ? tx("в сети") : tx("не в сети"), d.online, PDPcChat.unread(d.id) ? "•" : ""));
       }
     }
-    items.push(el("div", { class: "pc-sec" }, "👥 Люди"));
-    if (!rooms.length) items.push(el("p", { class: "pc-hint" }, "Переписка и файлы с кем угодно — по коду, без регистрации."));
+    items.push(el("div", { class: "pc-sec" }, tx("👥 Люди")));
+    if (!rooms.length) items.push(el("p", { class: "pc-hint" }, tx("Переписка и файлы с кем угодно — по коду, без регистрации.")));
     for (const r of rooms) {
       items.push(row({ href: PDPeople.url(r.id) }, (r.title.trim()[0] || "?").toUpperCase(), r.title,
         PDPeople.preview(r), r.online, r.unread ? String(r.unread) : ""));
@@ -326,7 +326,7 @@
     else renderChats();
   });
   PDPeople.onChange(renderChats);
-  PDPcChat.onIncoming((t) => toast(`📦 Пришёл файл «${t.name}» с «${t.from_label}»`));
+  PDPcChat.onIncoming((t) => toast(tx("📦 Пришёл файл «{0}» с «{1}»", t.name, t.from_label)));
   $("pcNewPerson").addEventListener("click", () => PDPeople.askNewChat());
   // Статусы «в сети» у других компьютеров и людей обновляем раз в 30 секунд.
   setInterval(() => {
@@ -338,8 +338,8 @@
     $("toolsHome").hidden = false;
     $("toolBack").hidden = true;
     $("toolIcon").textContent = "🛠";
-    $("toolTitle").textContent = "Инструменты";
-    $("toolSub").textContent = "Сканер и конвертеры. Готовый файл можно скачать или отправить на телефон";
+    $("toolTitle").textContent = tx("Инструменты");
+    $("toolSub").textContent = tx("Сканер и конвертеры. Готовый файл можно скачать или отправить на телефон");
     PDTools.renderHome($("toolsHome"), openTool);
   }
   function openTool(id) {
@@ -373,8 +373,8 @@
     const tick = () => {
       const left = Math.max(0, Math.round((until - Date.now()) / 1000));
       $("relinkExpires").textContent = left
-        ? `Код действует ещё ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`
-        : "Код истёк — закрой и нажми кнопку ещё раз";
+        ? tx("Код действует ещё {0}:{1}", Math.floor(left / 60), String(left % 60).padStart(2, "0"))
+        : tx("Код истёк — закрой и нажми кнопку ещё раз");
       if (!left) clearInterval(relinkTimer);
     };
     clearInterval(relinkTimer);
@@ -385,17 +385,17 @@
   $("relinkModal").addEventListener("click", (e) => { if (e.target === $("relinkModal")) closeRelink(); });
 
   $("logoutBtn").addEventListener("click", async () => {
-    if (!confirm("Отключить этот компьютер? Переписка с телефоном и файлы удалятся с сервера.")) return;
+    if (!confirm(tx("Отключить этот компьютер? Переписка с телефоном и файлы удалятся с сервера."))) return;
     chat.stop();
     try { await api(ROLE, "/api/pc/logout", { method: "POST" }); } catch { /* уже отключён */ }
-    toast("Компьютер отключён, всё удалено");
+    toast(tx("Компьютер отключён, всё удалено"));
     start();
   });
 
   // После входа через Google сервер возвращает сюда с ?login=ok или ?login_error=…
   const q = new URLSearchParams(location.search);
   if (q.get("login_error")) toast(q.get("login_error"), true);
-  else if (q.get("login") === "ok") toast("Вход выполнен — компьютер подключён ✅");
+  else if (q.get("login") === "ok") toast(tx("Вход выполнен — компьютер подключён ✅"));
   if (q.has("login") || q.has("login_error")) history.replaceState(null, "", "/");
 
   start();

@@ -15,7 +15,7 @@
 .side {
   display: flex; flex-direction: column; gap: 14px;
   padding: 16px; overflow-y: auto;
-  background: var(--panel); border-right: 1px solid var(--line);
+  background: var(--panel); border-inline-end: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 21px; font-weight: 800; }
 .brand img { width: 36px; height: 36px; border-radius: 10px; box-shadow: var(--glow); }
@@ -57,13 +57,13 @@
 
 @media (max-width: 820px) {
   .app { grid-template-columns: 1fr; grid-template-rows: auto; height: auto; min-height: 100vh; overflow: visible; }
-  .side { border-right: 0; border-bottom: 1px solid var(--line); }
+  .side { border-inline-end: 0; border-bottom: 1px solid var(--line); }
   .qr { max-width: 260px; margin: 0 auto 12px; }
   .chat { height: 100vh; }
 }
 
 /* ---------- переподключение */
-.pair-tip { margin-top: 12px !important; font-size: 13px !important; text-align: left; }
+.pair-tip { margin-top: 12px !important; font-size: 13px !important; text-align: start; }
 #relinkBtn { margin-top: 4px; }
 .modal {
   position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px;
@@ -98,7 +98,7 @@
 .tool-view .tool-body { padding: 20px 22px; }
 .tool-view .tool-body > * { max-width: 760px; }
 .tool-view .tool-files.pages { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
-.tool-view .tool-foot { padding-left: 22px; }
+.tool-view .tool-foot { padding-inline-start: 22px; }
 .tool-view .tool-foot .btn.block { width: auto; min-width: 320px; }
 .tool-view .tool-foot .progress { max-width: 760px; }
 @media (max-width: 1100px) { .tools-main .tools-grid { grid-template-columns: 1fr 1fr; } }
@@ -118,7 +118,7 @@
 .pc-sec { margin: 10px 8px 4px; font-size: 12px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--muted); }
 .pc-row {
   display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px; border: 0; border-radius: 12px;
-  background: none; color: var(--ink); font: inherit; text-align: left; text-decoration: none; cursor: pointer;
+  background: none; color: var(--ink); font: inherit; text-align: start; text-decoration: none; cursor: pointer;
   transition: background .15s;
 }
 .pc-row:hover { background: var(--panel); }
@@ -129,7 +129,7 @@
 }
 .pc-ava .ico { width: 22px; height: 22px; }
 .pc-ava .online {
-  position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  position: absolute; inset-inline-end: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
   background: var(--online); border: 2px solid var(--panel-2);
 }
 .pc-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -159,13 +159,13 @@
   border-radius: 16px; font-weight: 700; font-size: 16px;
 }
 .settings summary::-webkit-details-marker { display: none; }
-.settings summary::after { content: "▾"; position: absolute; right: 16px; top: 14px; color: var(--muted); transition: transform .2s; }
+.settings summary::after { content: "▾"; position: absolute; inset-inline-end: 16px; top: 14px; color: var(--muted); transition: transform .2s; }
 .settings { position: relative; }
 .settings[open] summary::after { transform: rotate(180deg); }
-.settings summary small { font-weight: 400; font-size: 13px; color: var(--muted); padding-right: 18px;
+.settings summary small { font-weight: 400; font-size: 13px; color: var(--muted); padding-inline-end: 18px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .settings[open] summary small { display: none; }
-.settings > :not(summary) { margin-left: 16px; margin-right: 16px; }
+.settings > :not(summary) { margin-inline-start: 16px; margin-inline-end: 16px; }
 .settings > :last-child { margin-bottom: 16px; }
 .set-h { margin: 14px 16px 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 .place-seg { margin-top: 0; }

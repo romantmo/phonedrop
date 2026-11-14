@@ -5,12 +5,12 @@
   .room-app { max-width: 920px; margin: 0 auto; box-shadow: 0 0 0 1px var(--line); }
 }
 .chat-head .logo { width: 42px; height: 42px; border-radius: 12px; }
-.chat-head a.icon-btn { margin-left: -8px; text-decoration: none; }
+.chat-head a.icon-btn { margin-inline-start: -8px; text-decoration: none; }
 .avatar.person {
   background: var(--grad) !important; font-weight: 800; font-size: 20px; text-transform: uppercase;
 }
 .avatar.person.online::after {
-  content: ""; position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border-radius: 50%;
+  content: ""; position: absolute; inset-inline-end: -1px; bottom: -1px; width: 13px; height: 13px; border-radius: 50%;
   background: var(--online); border: 3px solid var(--head);
 }
 .gate .hello { font-size: 54px; line-height: 1.1; margin-bottom: 6px; }
@@ -34,7 +34,7 @@
 .inv-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .inv-actions .btn { flex: 1; min-width: 150px; }
 .inv-x {
-  position: absolute; top: 10px; right: 10px; width: 34px; height: 34px; border: 0; border-radius: 50%;
+  position: absolute; top: 10px; inset-inline-end: 10px; width: 34px; height: 34px; border: 0; border-radius: 50%;
   background: var(--panel-2); color: var(--muted); cursor: pointer;
 }
 

@@ -168,8 +168,8 @@ a { color: var(--link); }
   background: var(--in); box-shadow: var(--shadow);
   word-break: break-word;
 }
-.msg.out .bubble { background: var(--out); border-top-right-radius: 5px; }
-.msg.in .bubble { border-top-left-radius: 5px; }
+.msg.out .bubble { background: var(--out); border-start-end-radius: 5px; }
+.msg.in .bubble { border-start-start-radius: 5px; }
 
 .bubble .text { white-space: pre-wrap; font-size: calc(var(--font) + 1px); }
 .bubble .media { display: block; margin: -4px -8px 4px; }
@@ -199,8 +199,8 @@ a { color: var(--link); }
   display: flex; justify-content: flex-end; align-items: center; gap: 4px;
   margin-top: 2px; font-size: 12px; color: var(--muted);
 }
-.meta .ttl { margin-right: auto; padding-right: 10px; }
-.tick { color: var(--tick); font-weight: 700; letter-spacing: -3px; padding-right: 3px; }
+.meta .ttl { margin-inline-end: auto; padding-inline-end: 10px; }
+.tick { color: var(--tick); font-weight: 700; letter-spacing: -3px; padding-inline-end: 3px; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 16px; }
 .actions button, .actions a {
@@ -230,7 +230,7 @@ a { color: var(--link); }
 }
 .composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .composer.recording { align-items: center; animation: rise .2s ease; }
-.rec-info { flex: 1; display: flex; align-items: center; gap: 10px; font-weight: 600; padding-left: 6px; }
+.rec-info { flex: 1; display: flex; align-items: center; gap: 10px; font-weight: 600; padding-inline-start: 6px; }
 .rec-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--danger); animation: blink 1s infinite; }
 @keyframes blink { 50% { opacity: .3; } }
 
@@ -246,7 +246,7 @@ a { color: var(--link); }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 .toast.err { background: var(--danger); }
 
-.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #9aa5ab; margin-right: 6px; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #9aa5ab; margin-inline-end: 6px; }
 .dot.on { background: var(--online); box-shadow: 0 0 0 3px rgba(45, 212, 191, .2); }
 
 .drop-overlay {
@@ -260,7 +260,7 @@ a { color: var(--link); }
 .expired-file { font-size: 15px; color: var(--muted); font-style: italic; }
 
 /* ---------- переключатели и баннеры */
-.choice { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.choice { display: flex; flex-direction: column; gap: 8px; text-align: start; }
 .choice label {
   display: flex; gap: 10px; align-items: flex-start;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 14px;
@@ -335,7 +335,7 @@ a { color: var(--link); }
   width: min(440px, calc(100% - 16px)); transform: translate(-50%, -140%);
   display: flex; align-items: center; gap: 12px; padding: 10px 14px;
   border: 1px solid var(--line); border-radius: 18px; background: var(--panel); color: var(--ink);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .25); font: inherit; text-align: left; cursor: pointer;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .25); font: inherit; text-align: start; cursor: pointer;
   transition: transform .28s cubic-bezier(.2, .8, .2, 1);
 }
 .pd-banner.show { transform: translate(-50%, 0); }
@@ -346,3 +346,27 @@ a { color: var(--link); }
   font-size: 14px; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* ---------- выбор языка */
+.lang-back {
+  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+  background: rgba(10, 14, 24, .45); padding: 16px;
+}
+.lang-box {
+  width: min(360px, 100%); padding: 18px; border-radius: 22px;
+  background: var(--panel); color: var(--ink); box-shadow: 0 16px 40px rgba(0, 0, 0, .3);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.lang-box h2 { margin: 0 0 6px; font-size: 18px; }
+.lang-opt {
+  padding: 13px 16px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--panel-2); color: var(--ink); font: inherit; font-size: 16px;
+  text-align: start; cursor: pointer;
+}
+.lang-opt.on { border-color: var(--accent, #6366f1); box-shadow: 0 0 0 2px var(--accent, #6366f1) inset; font-weight: 600; }
+.linkish { border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; padding: 0; }
+
+/* ---------- иврит: всё зеркально (справа налево). Стрелки «назад» и «отправить» тоже разворачиваем */
+[dir="rtl"] #backBtn svg, [dir="rtl"] #actionBtn svg, [dir="rtl"] .flip-rtl { transform: scaleX(-1); }
+[dir="rtl"] .msg.out { transform-origin: left bottom; }
+[dir="rtl"] .msg.in { transform-origin: right bottom; }

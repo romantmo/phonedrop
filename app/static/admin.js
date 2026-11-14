@@ -9,29 +9,29 @@ window.PDAdmin = (() => {
 
   function open() {
     const close = () => backdrop.remove();
-    const list = el("div", { class: "ad-list" }, el("p", { class: "pp-hint" }, "Загружаю…"));
-    const input = el("input", { type: "email", name: "email", placeholder: "например, mama@gmail.com",
-      autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": "Адрес Gmail" });
+    const list = el("div", { class: "ad-list" }, el("p", { class: "pp-hint" }, tx("Загружаю…")));
+    const input = el("input", { type: "email", name: "email", placeholder: tx("например, mama@gmail.com"),
+      autocomplete: "off", autocapitalize: "off", spellcheck: "false", "aria-label": tx("Адрес Gmail") });
     const form = el("form", { class: "pp-form" },
-      el("h3", {}, "👥 Пользователи"),
-      el("p", { class: "pp-hint" }, "Добавь Gmail человека — он сможет войти через Google, создавать свои чаты и пользоваться инструментами. Твои чаты и компьютеры он не видит."),
-      el("div", { class: "ad-add" }, input, el("button", { class: "btn primary", type: "submit" }, "Добавить")),
+      el("h3", {}, tx("👥 Пользователи")),
+      el("p", { class: "pp-hint" }, tx("Добавь Gmail человека — он сможет войти через Google, создавать свои чаты и пользоваться инструментами. Твои чаты и компьютеры он не видит.")),
+      el("div", { class: "ad-add" }, input, el("button", { class: "btn primary", type: "submit" }, tx("Добавить"))),
       list,
-      el("div", { class: "pp-form-actions" }, el("button", { class: "btn", type: "button", onclick: close }, "Закрыть")));
+      el("div", { class: "pp-form-actions" }, el("button", { class: "btn", type: "button", onclick: close }, tx("Закрыть"))));
 
     function render(data) {
       const rows = [];
       for (const email of data.admins) {
         rows.push(el("div", { class: "ad-row" },
-          el("div", { class: "ad-info" }, el("b", {}, email), el("small", {}, "👑 администратор")), null));
+          el("div", { class: "ad-info" }, el("b", {}, email), el("small", {}, tx("👑 администратор"))), null));
       }
       for (const u of data.users) {
-        const status = u.signed_in ? `входил, последний раз ${fmtTime(u.last_active)}` : "ещё не входил";
+        const status = u.signed_in ? tx("входил, последний раз {0}", fmtTime(u.last_active)) : tx("ещё не входил");
         rows.push(el("div", { class: "ad-row" },
           el("div", { class: "ad-info" }, el("b", {}, u.email), el("small", {}, status)),
-          el("button", { type: "button", class: "ad-del", "aria-label": `Убрать ${u.email}`, onclick: () => remove(u.email) }, "Убрать")));
+          el("button", { type: "button", class: "ad-del", "aria-label": tx("Убрать {0}", u.email), onclick: () => remove(u.email) }, tx("Убрать"))));
       }
-      if (!data.users.length) rows.push(el("p", { class: "pp-hint" }, "Пока никого не добавил."));
+      if (!data.users.length) rows.push(el("p", { class: "pp-hint" }, tx("Пока никого не добавил.")));
       list.replaceChildren(...rows);
     }
 
@@ -40,8 +40,8 @@ window.PDAdmin = (() => {
     }
 
     async function remove(email) {
-      if (!confirm(`Убрать ${email}? Он сразу выйдет на всех устройствах, его чаты и файлы удалятся.`)) return;
-      try { render(await api(ROLE(), `/api/admin/users/${encodeURIComponent(email)}`, { method: "DELETE" })); toast("Доступ закрыт"); }
+      if (!confirm(tx("Убрать {0}? Он сразу выйдет на всех устройствах, его чаты и файлы удалятся.", email))) return;
+      try { render(await api(ROLE(), `/api/admin/users/${encodeURIComponent(email)}`, { method: "DELETE" })); toast(tx("Доступ закрыт")); }
       catch (e) { toast(e.message, true); }
     }
 
@@ -54,7 +54,7 @@ window.PDAdmin = (() => {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }),
         }));
         input.value = "";
-        toast(`Готово: ${email} может войти через Google на drop.rbgen.com`);
+        toast(tx("Готово: {0} может войти через Google на drop.rbgen.com", email));
       } catch (err) {
         toast(err.message, true);
       }

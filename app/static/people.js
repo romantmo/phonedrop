@@ -19,7 +19,7 @@ window.PDPeople = (() => {
     if (ROLE() === "pc") {
       const w = window.open(url(id, fresh), "_blank");
       if (w) w.opener = null;
-      else toast("Браузер не дал открыть вкладку — нажми на чат в списке", true);
+      else toast(tx("Браузер не дал открыть вкладку — нажми на чат в списке"), true);
     } else {
       location.href = url(id, fresh);
     }
@@ -27,10 +27,10 @@ window.PDPeople = (() => {
 
   // Вторая строка в списке: последнее сообщение или «ждёт входа по коду».
   function preview(r) {
-    if (!r.joined) return r.invite_expires ? "⏳ ждёт входа по коду" : "ещё не вошёл — открой чат и получи код";
+    if (!r.joined) return r.invite_expires ? tx("⏳ ждёт входа по коду") : tx("ещё не вошёл — открой чат и получи код");
     const me = r.guest ? "guest" : "owner";  // r.guest — я вошёл в этот чат по чужому коду
-    if (r.last) return (r.last.sender === me ? "Вы: " : "") + r.last.preview;
-    return "вошёл в чат — напиши первым";
+    if (r.last) return (r.last.sender === me ? tx("Вы: ") : "") + r.last.preview;
+    return tx("вошёл в чат — напиши первым");
   }
 
   async function refresh() {
@@ -51,21 +51,21 @@ window.PDPeople = (() => {
   function askNewChat() {
     const close = () => backdrop.remove();
     const form = el("form", { class: "pp-form" },
-      el("h3", {}, "👤 Чат с человеком"),
-      el("p", { class: "pp-hint" }, "Получишь код из 9 цифр. Собеседник вводит его на сайте — регистрация ему не нужна."),
-      el("label", {}, "Как зовут собеседника?",
-        el("input", { name: "title", maxlength: "40", placeholder: "Например: Саша", autocomplete: "off" })),
-      el("label", {}, "Как подписать тебя для него?",
-        el("input", { name: "owner", maxlength: "40", placeholder: "Например: Роман", autocomplete: "off" })),
+      el("h3", {}, tx("👤 Чат с человеком")),
+      el("p", { class: "pp-hint" }, tx("Получишь код из 9 цифр. Собеседник вводит его на сайте — регистрация ему не нужна.")),
+      el("label", {}, tx("Как зовут собеседника?"),
+        el("input", { name: "title", maxlength: "40", placeholder: tx("Например: Саша"), autocomplete: "off" })),
+      el("label", {}, tx("Как подписать тебя для него?"),
+        el("input", { name: "owner", maxlength: "40", placeholder: tx("Например: Роман"), autocomplete: "off" })),
       el("div", { class: "pp-form-actions" },
-        el("button", { class: "btn primary", type: "submit" }, "Создать и получить код"),
-        el("button", { class: "btn", type: "button", onclick: close }, "Отмена")));
+        el("button", { class: "btn primary", type: "submit" }, tx("Создать и получить код")),
+        el("button", { class: "btn", type: "button", onclick: close }, tx("Отмена"))));
     form.owner.value = savedName();
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const title = form.title.value.trim();
       const ownerName = form.owner.value.trim();
-      if (!title) { form.title.focus(); return toast("Напиши, как зовут собеседника", true); }
+      if (!title) { form.title.focus(); return toast(tx("Напиши, как зовут собеседника"), true); }
       try { localStorage.setItem(NAME_KEY, ownerName); } catch { /* не важно */ }
       const btn = form.querySelector("button[type=submit]");
       btn.disabled = true;

@@ -25,7 +25,7 @@
     $("errorText").textContent = text;
     const a = $("errorLink");
     a.href = link ? link.href : "/get";
-    a.textContent = link ? link.text : "🔑 Ввести код";
+    a.textContent = link ? link.text : tx("🔑 Ввести код");
     show("errorView");
   }
 
@@ -79,9 +79,9 @@
 
     sendFiles(files) {
       for (const f of files) {
-        if (!f.size) { toast(`«${f.name}» пустой — пропускаю`, true); continue; }
+        if (!f.size) { toast(tx("«{0}» пустой — пропускаю", f.name), true); continue; }
         if (state && f.size > state.max_mb * 1024 * 1024) {
-          toast(`«${f.name}» больше ${Math.round(state.max_mb / 1024)} ГБ`, true);
+          toast(tx("«{0}» больше {1} ГБ", f.name, Math.round(state.max_mb / 1024)), true);
           continue;
         }
         this.enqueue({ file: f, name: f.name || "file", size: f.size, received: 0, kind: "file" });
@@ -91,7 +91,7 @@
     sendVoice(blob, name, seconds) {
       const file = new File([blob], name, { type: blob.type });
       this.enqueue({ file, name, size: file.size, received: 0, kind: "voice", duration: +seconds.toFixed(1),
-        label: "🎤 Голосовое " + fmtDuration(seconds) });
+        label: tx("🎤 Голосовое ") + fmtDuration(seconds) });
     }
 
     // ---------- очередь отправки: файлы уходят по одному
@@ -153,7 +153,7 @@
         return;
       }
       if (result === "paused") { u.state = "paused"; this.paint(u); return; }
-      if (result === "gone") { toast(`«${u.name}»: загрузка удалена`, true); return this.drop(u); }
+      if (result === "gone") { toast(tx("«{0}»: загрузка удалена", u.name), true); return this.drop(u); }
       // Готово: само сообщение придёт по WebSocket, но берём его и напрямую — вдруг связь мигнула.
       this.drop(u);
       try {
@@ -195,19 +195,19 @@
     paint(u) {
       const pct = u.size ? Math.floor((u.received / u.size) * 100) : 0;
       let status;
-      if (u.state === "queued") status = u.received ? `▶ продолжу · ${pct}%` : "⏳ в очереди";
-      else if (u.state === "lost") status = `⏸ Отправка прервалась на ${pct}% — выбери этот же файл, чтобы продолжить`;
+      if (u.state === "queued") status = u.received ? tx("▶ продолжу · {0}%", pct) : tx("⏳ в очереди");
+      else if (u.state === "lost") status = tx("⏸ Отправка прервалась на {0}% — выбери этот же файл, чтобы продолжить", pct);
       else if (u.state === "error") status = `⚠️ ${u.error}`;
       else status = PDUpload.statusText(u.job, u.size, fmtSize);
       const bar = el("div");
       bar.style.width = pct + "%";
       const buttons = [];
-      if (u.state === "uploading") buttons.push(el("button", { type: "button", onclick: () => this.pause(u) }, "⏸ Пауза"));
+      if (u.state === "uploading") buttons.push(el("button", { type: "button", onclick: () => this.pause(u) }, tx("⏸ Пауза")));
       if (u.state === "paused" || u.state === "error") {
-        buttons.push(el("button", { type: "button", onclick: () => this.resume(u) }, "▶ Продолжить"));
+        buttons.push(el("button", { type: "button", onclick: () => this.resume(u) }, tx("▶ Продолжить")));
       }
-      if (u.state === "lost") buttons.push(el("button", { type: "button", onclick: () => this.pick(u) }, "📂 Выбрать файл"));
-      buttons.push(el("button", { type: "button", class: "del", onclick: () => this.cancel(u) }, "Отменить"));
+      if (u.state === "lost") buttons.push(el("button", { type: "button", onclick: () => this.pick(u) }, tx("📂 Выбрать файл")));
+      buttons.push(el("button", { type: "button", class: "del", onclick: () => this.cancel(u) }, tx("Отменить")));
       u.node.replaceChildren(el("div", { class: "bubble" },
         el("div", { class: "up-name" }, u.label || u.name, el("small", {}, " · " + fmtSize(u.size))),
         el("div", { class: "progress" }, bar),
@@ -227,21 +227,21 @@
     onEvent,
     onClosed,
     onResync: () => load(false),
-    onConnection: (ok) => { if (!ok) $("roomStatus").textContent = "нет связи с сервером…"; else setStatus(); },
+    onConnection: (ok) => { if (!ok) $("roomStatus").textContent = tx("нет связи с сервером…"); else setStatus(); },
   });
 
   function onClosed(reason) {
     chat.stop();
     sessionStorage.removeItem("pd-inv-" + rid);
     const texts = {
-      room_closed: ["Чат закрыт", "Создатель закрыл этот чат — переписка и файлы удалены."],
-      idle: ["Чат закрылся сам", "В нём 30 дней никто не писал — переписка и файлы удалены."],
-      replaced: ["Вход больше не работает", "В этот чат вошли по новому коду с другого устройства. Если это был не ты — попроси у собеседника новый код."],
-      left: ["Ты вышел из чата", "Чтобы вернуться, попроси у собеседника новый код."],
+      room_closed: [tx("Чат закрыт"), tx("Создатель закрыл этот чат — переписка и файлы удалены.")],
+      idle: [tx("Чат закрылся сам"), tx("В нём 30 дней никто не писал — переписка и файлы удалены.")],
+      replaced: [tx("Вход больше не работает"), tx("В этот чат вошли по новому коду с другого устройства. Если это был не ты — попроси у собеседника новый код.")],
+      left: [tx("Ты вышел из чата"), tx("Чтобы вернуться, попроси у собеседника новый код.")],
     };
-    const [title, text] = texts[reason] || ["Чат не найден",
-      "Его закрыли, или ты открыл ссылку в другом браузере. Попроси у собеседника новый код."];
-    const back = room && room.me === "owner" ? { href: backUrl(), text: "← К списку чатов" } : null;
+    const [title, text] = texts[reason] || [tx("Чат не найден"),
+      tx("Его закрыли, или ты открыл ссылку в другом браузере. Попроси у собеседника новый код.")];
+    const back = room && room.me === "owner" ? { href: backUrl(), text: tx("← К списку чатов") } : null;
     fail(title, text, back);
   }
 
@@ -249,8 +249,8 @@
   function setStatus() {
     if (!room) return;
     let text;
-    if (room.me === "owner" && !room.joined) text = "ещё не вошёл — отправь ему код";
-    else text = room.peer_online ? "в сети" : "не в сети";
+    if (room.me === "owner" && !room.joined) text = tx("ещё не вошёл — отправь ему код");
+    else text = room.peer_online ? tx("в сети") : tx("не в сети");
     $("roomStatus").textContent = text;
     $("avatar").classList.toggle("online", !!room.peer_online && room.joined);
   }
@@ -272,12 +272,12 @@
 
   // ---------- приглашение (только у создателя)
   function fmtUntil(ts) {
-    return new Date(ts * 1000).toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+    return new Date(ts * 1000).toLocaleString(PDI18N.locale, { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
   }
 
   function inviteText() {
-    return `Привет! Давай переписываться в PhoneDrop 👋\nОткрой ссылку: ${invite.link}\n` +
-      `Или зайди на ${invite.get_url} и введи код: ${invite.code}\n(код одноразовый, действует до ${fmtUntil(invite.expires)})`;
+    return tx("Привет! Давай переписываться в PhoneDrop 👋\nОткрой ссылку: {0}\n", invite.link) +
+      tx("Или зайди на {0} и введи код: {1}\n(код одноразовый, действует до {2})", invite.get_url, invite.code, fmtUntil(invite.expires));
   }
 
   function renderInvite(force) {
@@ -287,21 +287,21 @@
     const visible = force || !room.joined;
     box.hidden = !visible;
     if (!visible) return;
-    $("invTitle").textContent = room.joined ? "Новый код приглашения" : `Пригласи: ${room.title}`;
+    $("invTitle").textContent = room.joined ? tx("Новый код приглашения") : tx("Пригласи: {0}", room.title);
     $("invHas").hidden = !invite;
     $("invNone").hidden = !!invite;
     if (invite) {
       $("invGet").textContent = invite.get_url.replace(/^https?:\/\//, "");
       $("invCode").textContent = invite.code;
-      $("invMeta").textContent = `Код одноразовый, действует до ${fmtUntil(invite.expires)}` +
-        (room.joined ? ". Кто войдёт по нему — заменит нынешнего собеседника" : "");
+      $("invMeta").textContent = tx("Код одноразовый, действует до {0}", fmtUntil(invite.expires)) +
+        (room.joined ? tx(". Кто войдёт по нему — заменит нынешнего собеседника") : "");
     } else {
       $("invNoneText").textContent = room.invite_expires
-        ? `Код уже выдан и действует до ${fmtUntil(room.invite_expires)}. Потерял его? Получи новый — старый перестанет работать.`
+        ? tx("Код уже выдан и действует до {0}. Потерял его? Получи новый — старый перестанет работать.", fmtUntil(room.invite_expires))
         : room.joined
-          ? "Собеседник сменил телефон или браузер? Получи новый код — после входа по нему старый вход перестанет работать."
-          : "Получи код и продиктуй или отправь его собеседнику.";
-      $("invMake").textContent = room.invite_expires || room.joined ? "🔑 Получить новый код" : "🔑 Получить код";
+          ? tx("Собеседник сменил телефон или браузер? Получи новый код — после входа по нему старый вход перестанет работать.")
+          : tx("Получи код и продиктуй или отправь его собеседнику.");
+      $("invMake").textContent = room.invite_expires || room.joined ? tx("🔑 Получить новый код") : tx("🔑 Получить код");
     }
   }
 
@@ -332,7 +332,7 @@
       state = await api(ROLE, `/api/rooms/${rid}`);
     } catch (e) {
       if (e.status === 404 || e.status === 403) return onClosed("unauthorized");
-      if (first) return fail("Нет связи", "Не получилось открыть чат. Проверь интернет и обнови страницу.", { href: location.href, text: "Обновить" });
+      if (first) return fail(tx("Нет связи"), tx("Не получилось открыть чат. Проверь интернет и обнови страницу."), { href: location.href, text: tx("Обновить") });
       return;
     }
     room = state.room;
@@ -344,10 +344,10 @@
       // Незаконченные отправки (страницу закрыли посреди загрузки) — можно продолжить.
       for (const up of state.uploads) {
         chat.enqueue({ id: up.id, name: up.name, size: up.size, received: up.received, kind: up.kind,
-          label: up.kind === "voice" ? "🎤 Голосовое" : null });
+          label: up.kind === "voice" ? tx("🎤 Голосовое") : null });
       }
-      $("emptyText").textContent = `Напиши сообщение, отправь фото, голосовое или файл (до ${Math.round(state.max_mb / 1024)} ГБ). ` +
-        `Файлы хранятся ${state.file_ttl_hours} ч, текст — пока чат не закроют.`;
+      $("emptyText").textContent = tx("Напиши сообщение, отправь фото, голосовое или файл (до {0} ГБ). ", Math.round(state.max_mb / 1024)) +
+        tx("Файлы хранятся {0} ч, текст — пока чат не закроют.", state.file_ttl_hours);
     }
     renderInvite(false);
     renderPushBanner();
@@ -373,11 +373,11 @@
       invite = null;
       sessionStorage.removeItem("pd-inv-" + rid);
       $("inviteBox").hidden = true;
-      toast(`✅ ${room.title} вошёл в чат`);
+      toast(tx("✅ {0} вошёл в чат", room.title));
       setStatus();
     } else if (msg.type === "left") {
       room.joined = false;
-      toast(`${room.title} вышел из чата`);
+      toast(tx("{0} вышел из чата", room.title));
       setStatus();
       renderInvite(false);
     }
@@ -390,7 +390,7 @@
   $("menuInvite").addEventListener("click", () => renderInvite(true));
 
   $("menuRename").addEventListener("click", async () => {
-    const title = prompt("Как назвать собеседника?", room.title);
+    const title = prompt(tx("Как назвать собеседника?"), room.title);
     if (!title || !title.trim()) return;
     try {
       room.title = (await api(ROLE, `/api/rooms/${rid}/rename`, {
@@ -403,7 +403,7 @@
   });
 
   $("menuClose").addEventListener("click", async () => {
-    if (!confirm(`Закрыть чат с «${room.title}»? Вся переписка и файлы удалятся у вас обоих.`)) return;
+    if (!confirm(tx("Закрыть чат с «{0}»? Вся переписка и файлы удалятся у вас обоих.", room.title))) return;
     try {
       await api(ROLE, `/api/rooms/${rid}`, { method: "DELETE" });
     } catch (e) {
@@ -413,7 +413,7 @@
   });
 
   $("menuLeave").addEventListener("click", async () => {
-    if (!confirm("Выйти из чата? Вернуться можно будет только по новому коду от собеседника.")) return;
+    if (!confirm(tx("Выйти из чата? Вернуться можно будет только по новому коду от собеседника."))) return;
     try {
       await api(ROLE, `/api/rooms/${rid}/leave`, { method: "POST" });
     } catch (e) {
@@ -425,14 +425,14 @@
   $("menuInfo").addEventListener("click", () => {
     const hours = state ? state.file_ttl_hours : 24;
     const days = state ? state.idle_days : 30;
-    alert(`🔒 Как хранится переписка\n\n• Текст — пока чат не закроют.\n• Фото, голосовые и файлы — ${hours} ч, потом удаляются сами.\n` +
-      `• Если в чате ${days} дней никто не пишет, он закрывается сам.\n• Файлы видите только вы двое.`);
+    alert(tx("🔒 Как хранится переписка\n\n• Текст — пока чат не закроют.\n• Фото, голосовые и файлы — {0} ч, потом удаляются сами.\n", hours) +
+      tx("• Если в чате {0} дней никто не пишет, он закрывается сам.\n• Файлы видите только вы двое.", days));
   });
 
   async function enablePush() {
     try {
       await push.enable(ROLE, state.vapid_key);
-      toast("Уведомления включены");
+      toast(tx("Уведомления включены"));
     } catch (e) {
       toast(e.message, true);
     }
@@ -441,9 +441,9 @@
   $("pushBannerBtn").addEventListener("click", enablePush);
   $("menuPush").addEventListener("click", () => {
     const status = push.status();
-    if (status === "granted") toast("Уведомления уже включены ✅");
-    else if (status === "unsupported") toast("Этот браузер не поддерживает уведомления", true);
-    else if (status === "denied") toast("Уведомления запрещены. Разреши их в настройках сайта", true);
+    if (status === "granted") toast(tx("Уведомления уже включены ✅"));
+    else if (status === "unsupported") toast(tx("Этот браузер не поддерживает уведомления"), true);
+    else if (status === "denied") toast(tx("Уведомления запрещены. Разреши их в настройках сайта"), true);
     else enablePush();
   });
 
@@ -459,15 +459,15 @@
     try {
       info = await api(ROLE, `/api/rooms/invite/${joinToken}`);
     } catch (e) {
-      return fail("Приглашение не работает", e.message);
+      return fail(tx("Приглашение не работает"), e.message);
     }
     if (info.mine) {
-      $("joinTitle").textContent = "Это твоё приглашение";
-      $("joinText").textContent = "Отправь эту ссылку собеседнику — войти по ней должен он, а не ты.";
+      $("joinTitle").textContent = tx("Это твоё приглашение");
+      $("joinText").textContent = tx("Отправь эту ссылку собеседнику — войти по ней должен он, а не ты.");
       $("joinBtn").hidden = true;
       return;
     }
-    $("joinTitle").textContent = `${info.owner_name} приглашает тебя в чат`;
+    $("joinTitle").textContent = tx("{0} приглашает тебя в чат", info.owner_name);
     $("joinBtn").addEventListener("click", async () => {
       $("joinBtn").disabled = true;
       try {
@@ -477,14 +477,14 @@
         location.replace(`/room/${r.room}`);
       } catch (e) {
         $("joinBtn").disabled = false;
-        fail("Приглашение не работает", e.message);
+        fail(tx("Приглашение не работает"), e.message);
       }
     });
   }
 
   async function start() {
     if (joinToken) return startJoin();
-    if (!rid) return fail("Чат не найден", "Неверная ссылка.");
+    if (!rid) return fail(tx("Чат не найден"), tx("Неверная ссылка."));
     try { invite = JSON.parse(sessionStorage.getItem("pd-inv-" + rid) || "null"); } catch { invite = null; }
     await load(true);
     if (!room) return;

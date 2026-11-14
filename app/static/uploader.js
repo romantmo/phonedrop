@@ -46,11 +46,11 @@ window.PDUpload = (() => {
           let data = null;
           try { data = JSON.parse(xhr.responseText); } catch { /* не JSON */ }
           if ((xhr.status === 200 || xhr.status === 409) && data) resolve(data.received);
-          else reject(Object.assign(new Error((data && data.detail) || `Ошибка ${xhr.status}`),
+          else reject(Object.assign(new Error((data && data.detail) || tx("Ошибка {0}", xhr.status)),
             { fatal: xhr.status >= 400 && xhr.status < 500 }));
         };
-        xhr.onerror = () => reject(Object.assign(new Error("Нет связи"), { fatal: false }));
-        xhr.onabort = () => reject(Object.assign(new Error("Пауза"), { paused: true }));
+        xhr.onerror = () => reject(Object.assign(new Error(tx("Нет связи")), { fatal: false }));
+        xhr.onabort = () => reject(Object.assign(new Error(tx("Пауза")), { paused: true }));
         xhr.send(blob);
       });
     }
@@ -96,20 +96,20 @@ window.PDUpload = (() => {
     }
   }
 
-  const fmtSpeed = (bps, fmtSize) => (bps > 0 ? fmtSize(bps) + "/с" : "");
+  const fmtSpeed = (bps, fmtSize) => (bps > 0 ? fmtSize(bps) + tx("/с") : "");
   function fmtEta(sec) {
     if (!isFinite(sec) || sec <= 0) return "";
-    if (sec < 60) return `≈ ${Math.ceil(sec)} с`;
-    if (sec < 3600) return `≈ ${Math.ceil(sec / 60)} мин`;
-    return `≈ ${Math.floor(sec / 3600)} ч ${Math.ceil((sec % 3600) / 60)} мин`;
+    if (sec < 60) return tx("≈ {0} с", Math.ceil(sec));
+    if (sec < 3600) return tx("≈ {0} мин", Math.ceil(sec / 60));
+    return tx("≈ {0} ч {1} мин", Math.floor(sec / 3600), Math.ceil((sec % 3600) / 60));
   }
 
   // Подпись под полоской прогресса.
   function statusText(job, size, fmtSize) {
     const pct = Math.floor((job.received / size) * 100);
-    if (job.state === "paused") return `⏸ Пауза · ${pct}%`;
-    if (job.state === "retry") return `📡 Нет связи — повторю через ${job.retryIn} с · ${pct}%`;
-    return `${pct}% · ${fmtSize(job.received)} из ${fmtSize(size)} · ${fmtSpeed(job.speed, fmtSize)} ${fmtEta(job.eta)}`;
+    if (job.state === "paused") return tx("⏸ Пауза · {0}%", pct);
+    if (job.state === "retry") return tx("📡 Нет связи — повторю через {0} с · {1}%", job.retryIn, pct);
+    return tx("{0}% · {1} из {2} · {3} {4}", pct, fmtSize(job.received), fmtSize(size), fmtSpeed(job.speed, fmtSize), fmtEta(job.eta));
   }
 
   // Выбор файла заново после перезагрузки страницы (браузер не помнит файл).
@@ -120,7 +120,7 @@ window.PDUpload = (() => {
       const file = input.files[0];
       if (!file) return;
       if (file.size !== size || file.name !== name) {
-        toast(`Это другой файл. Нужен «${name}» (${fmtSize(size)})`, true);
+        toast(tx("Это другой файл. Нужен «{0}» ({1})", name, fmtSize(size)), true);
         return;
       }
       onOk(file);

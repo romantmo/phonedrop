@@ -31,13 +31,13 @@ window.PD = (() => {
   }
 
   function fmtSize(bytes) {
-    if (bytes < 1024) return bytes + " Б";
-    if (bytes < 1024 ** 2) return Math.round(bytes / 1024) + " КБ";
-    if (bytes < 1024 ** 3) return (bytes / 1024 ** 2).toFixed(1) + " МБ";
-    return (bytes / 1024 ** 3).toFixed(2) + " ГБ";
+    if (bytes < 1024) return bytes + tx(" Б");
+    if (bytes < 1024 ** 2) return Math.round(bytes / 1024) + tx(" КБ");
+    if (bytes < 1024 ** 3) return (bytes / 1024 ** 2).toFixed(1) + tx(" МБ");
+    return (bytes / 1024 ** 3).toFixed(2) + tx(" ГБ");
   }
 
-  const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString(PDI18N.locale, { hour: "2-digit", minute: "2-digit" });
 
   function fmtDuration(sec) {
     sec = Math.round(sec || 0);
@@ -48,9 +48,9 @@ window.PD = (() => {
     const d = new Date(ts * 1000);
     const today = new Date();
     const yesterday = new Date(Date.now() - 864e5);
-    if (d.toDateString() === today.toDateString()) return "Сегодня";
-    if (d.toDateString() === yesterday.toDateString()) return "Вчера";
-    return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+    if (d.toDateString() === today.toDateString()) return tx("Сегодня");
+    if (d.toDateString() === yesterday.toDateString()) return tx("Вчера");
+    return d.toLocaleDateString(PDI18N.locale, { day: "numeric", month: "long" });
   }
 
   async function api(role, path, options = {}) {
@@ -59,7 +59,7 @@ window.PD = (() => {
     let data = null;
     try { data = await response.json(); } catch { /* пустой ответ */ }
     if (!response.ok) {
-      const error = new Error((data && data.detail) || `Ошибка ${response.status}`);
+      const error = new Error((data && data.detail) || tx("Ошибка {0}", response.status));
       error.status = response.status;
       throw error;
     }
@@ -79,7 +79,7 @@ window.PD = (() => {
       document.execCommand("copy");
       ta.remove();
     }
-    toast("Скопировано");
+    toast(tx("Скопировано"));
   }
 
   async function copyImage(url) {
@@ -96,9 +96,9 @@ window.PD = (() => {
         png = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
       }
       await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
-      toast("Картинка скопирована — вставляй через Ctrl+V");
+      toast(tx("Картинка скопирована — вставляй через Ctrl+V"));
     } catch {
-      toast("Браузер не дал скопировать картинку. Скачай её", true);
+      toast(tx("Браузер не дал скопировать картинку. Скачай её"), true);
     }
   }
 
@@ -133,7 +133,7 @@ window.PD = (() => {
   async function fetchFile(item) {
     if (shareCache.has(item.url)) return shareCache.get(item.url);
     const response = await fetch(item.url, { credentials: "same-origin" });
-    if (!response.ok) throw new Error("Файл больше недоступен");
+    if (!response.ok) throw new Error(tx("Файл больше недоступен"));
     const blob = await response.blob();
     const file = new File([blob], item.name, { type: item.mime || blob.type });
     shareCache.set(item.url, file);
@@ -146,13 +146,13 @@ window.PD = (() => {
 
   async function share(files) {
     if (!navigator.canShare({ files })) {
-      toast("Этот тип файла нельзя отправить через «Поделиться» — скачай его", true);
+      toast(tx("Этот тип файла нельзя отправить через «Поделиться» — скачай его"), true);
       return;
     }
     try {
       await navigator.share({ files });
     } catch (e) {
-      if (e.name !== "AbortError") toast("Нажми «Поделиться» ещё раз", true);
+      if (e.name !== "AbortError") toast(tx("Нажми «Поделиться» ещё раз"), true);
     }
   }
 
@@ -160,7 +160,7 @@ window.PD = (() => {
     const ready = items.map((i) => shareCache.get(i.url));
     if (ready.every(Boolean)) return share(ready);
     const started = Date.now();
-    toast("Готовлю файл…");
+    toast(tx("Готовлю файл…"));
     let files;
     try {
       files = await Promise.all(items.map(fetchFile));
@@ -169,14 +169,14 @@ window.PD = (() => {
     }
     // Если скачивание заняло долго, браузер уже «забыл» нажатие — просим нажать ещё раз.
     if (Date.now() - started < 3000) return share(files);
-    toast("Файл готов — нажми «Поделиться» ещё раз");
+    toast(tx("Файл готов — нажми «Поделиться» ещё раз"));
   }
 
   // Сколько осталось жить файлу: «⏳ 23 ч» (файлы в чате с человеком хранятся сутки).
   function fmtLeft(expires) {
     const min = (expires * 1000 - Date.now()) / 60000;
-    if (min <= 0) return "удаляется";
-    return min >= 60 ? `удалится через ${Math.floor(min / 60)} ч` : `удалится через ${Math.max(1, Math.round(min))} мин`;
+    if (min <= 0) return tx("удаляется");
+    return min >= 60 ? tx("удалится через {0} ч", Math.floor(min / 60)) : tx("удалится через {0} мин", Math.max(1, Math.round(min)));
   }
 
   // Чат. Подходит и для «телефон ↔ компьютер», и для «чата с человеком» (room.js):
@@ -250,16 +250,16 @@ window.PD = (() => {
 
       if (m.kind === "text") {
         bubble.append(el("div", { class: "text", dir: "auto" }, linkify(m.text)));
-        actions.append(el("button", { type: "button", onclick: () => copyText(m.text) }, "Копировать"));
+        actions.append(el("button", { type: "button", onclick: () => copyText(m.text) }, tx("Копировать")));
       } else if (m.expired) {
         bubble.append(el("div", { class: "expired-file" },
-          (m.kind === "voice" ? "🎤 Голосовое" : "📎 " + m.name) + " — удалено, срок хранения истёк"));
+          (m.kind === "voice" ? tx("🎤 Голосовое") : "📎 " + m.name) + tx(" — удалено, срок хранения истёк")));
       } else if (m.kind === "voice") {
         bubble.append(
-          el("div", { class: "voice-label" }, "🎤 Голосовое" + (m.duration ? " · " + fmtDuration(m.duration) : "")),
+          el("div", { class: "voice-label" }, tx("🎤 Голосовое") + (m.duration ? " · " + fmtDuration(m.duration) : "")),
           el("audio", { controls: true, preload: "metadata", src: m.url })
         );
-        actions.append(el("a", { href: m.download_url, download: m.name }, "Скачать"));
+        actions.append(el("a", { href: m.download_url, download: m.name }, tx("Скачать")));
       } else {
         const mime = m.mime || "";
         if (IMG_RE.test(mime)) {
@@ -279,40 +279,40 @@ window.PD = (() => {
           const ext = (m.name.includes(".") ? m.name.split(".").pop() : "file").slice(0, 4);
           const openUrl = m.viewable ? m.url : m.preview_url;  // Word/Excel/PowerPoint — просмотр как PDF
           const open = openUrl
-            ? { href: openUrl, target: "_blank", rel: "noopener", title: "Открыть" }
-            : { href: m.download_url, download: m.name, title: "Скачать" };
+            ? { href: openUrl, target: "_blank", rel: "noopener", title: tx("Открыть") }
+            : { href: m.download_url, download: m.name, title: tx("Скачать") };
           bubble.append(el("a", { class: "file-row", ...open },
             el("div", { class: "ext" }, ext),
             el("div", { class: "finfo" },
-              el("div", { class: "fname" }, m.name),
-              el("div", { class: "fsize" }, fmtSize(m.size) + (openUrl ? " · нажми, чтобы открыть" : "")))));
+              el("div", { class: "fname", dir: "auto" }, m.name),
+              el("div", { class: "fsize" }, fmtSize(m.size) + (openUrl ? tx(" · нажми, чтобы открыть") : "")))));
         }
         if (m.viewable && !mime.startsWith("video/") && !mime.startsWith("audio/")) {
-          actions.append(el("a", { href: m.url, target: "_blank", rel: "noopener" }, "Открыть"));
+          actions.append(el("a", { href: m.url, target: "_blank", rel: "noopener" }, tx("Открыть")));
         } else if (m.preview_url) {
-          actions.append(el("a", { href: m.preview_url, target: "_blank", rel: "noopener" }, "Открыть"));
+          actions.append(el("a", { href: m.preview_url, target: "_blank", rel: "noopener" }, tx("Открыть")));
         }
-        actions.append(el("a", { href: m.download_url, download: m.name }, "Скачать"));
+        actions.append(el("a", { href: m.download_url, download: m.name }, tx("Скачать")));
         if (m.convert_to) {
           const btn = el("button", { type: "button", onclick: () => this.convertMessage(m.id, btn) },
-            m.convert_to === "pdf" ? "В PDF" : "В JPG");
+            m.convert_to === "pdf" ? tx("В PDF") : tx("В JPG"));
           actions.append(btn);
         }
         if (this.mobile && canShareFiles) {
           actions.append(el("button", { type: "button",
-            onclick: () => shareFiles([{ url: m.url, name: m.name, mime: m.mime }]) }, "Поделиться"));
+            onclick: () => shareFiles([{ url: m.url, name: m.name, mime: m.mime }]) }, tx("Поделиться")));
         }
         if (IMG_RE.test(mime) && window.ClipboardItem && !this.mobile) {
-          actions.append(el("button", { type: "button", onclick: () => copyImage(m.url) }, "Копировать картинку"));
+          actions.append(el("button", { type: "button", onclick: () => copyImage(m.url) }, tx("Копировать картинку")));
         }
       }
 
       if (this.canDelete(m)) {
-        actions.append(el("button", { type: "button", class: "del", onclick: () => this.deleteMessage(m.id) }, "Удалить"));
+        actions.append(el("button", { type: "button", class: "del", onclick: () => this.deleteMessage(m.id) }, tx("Удалить")));
       }
       bubble.append(actions);
       bubble.append(el("div", { class: "meta" },
-        m.expires && !m.expired ? el("span", { class: "ttl", title: "Файлы в этом чате хранятся сутки" }, "⏳ " + fmtLeft(m.expires)) : null,
+        m.expires && !m.expired ? el("span", { class: "ttl", title: tx("Файлы в этом чате хранятся сутки") }, "⏳ " + fmtLeft(m.expires)) : null,
         fmtTime(m.created), mine ? el("span", { class: "tick" }, "✓✓") : null));
       return el("div", { class: "msg " + (mine ? "out" : "in"), id: "m-" + m.id }, bubble);
     }
@@ -320,10 +320,10 @@ window.PD = (() => {
     async convertMessage(id, btn) {
       const label = btn.textContent;
       btn.disabled = true;
-      btn.textContent = "Конвертирую…";
+      btn.textContent = tx("Конвертирую…");
       try {
         await api(this.role, `/api/messages/${id}/convert`, { method: "POST" });
-        toast("Готово — новый файл в чате");
+        toast(tx("Готово — новый файл в чате"));
       } catch (e) {
         toast(e.message, true);
       } finally {
@@ -351,7 +351,7 @@ window.PD = (() => {
         input.style.height = "auto";
         input.style.height = Math.min(input.scrollHeight, 180) + "px";
         this.actionBtn.classList.toggle("has-text", input.value.trim().length > 0);
-        this.actionBtn.setAttribute("aria-label", input.value.trim() ? "Отправить" : "Записать голосовое");
+        this.actionBtn.setAttribute("aria-label", input.value.trim() ? tx("Отправить") : tx("Записать голосовое"));
       };
       input.addEventListener("input", resize);
       input.addEventListener("keydown", (e) => {
@@ -412,21 +412,21 @@ window.PD = (() => {
         el("button", { type: "button", class: "at-tile " + color, onclick: () => { close(); fn(); } },
           el("span", { class: "at-ico", "aria-hidden": "true" }, ico), el("b", {}, label), el("small", {}, sub));
       const tiles = [
-        tile("🖼", "Галерея", "фото и видео", "c1", () => this.pick({ accept: "image/*,video/*", multiple: true })),
-        tile("📷", "Камера", "сделать фото", "c2", () => this.pick({ accept: "image/*", capture: "environment" })),
-        tile("🎥", "Видео", "снять видео", "c3", () => this.pick({ accept: "video/*", capture: "environment" })),
-        tile("📁", "Файлы", "Диск, Загрузки", "c4", () => this.pick({ multiple: true })),
-        tile("📍", "Место", "где я сейчас", "c5", () => this.sendLocation()),
+        tile("🖼", tx("Галерея"), tx("фото и видео"), "c1", () => this.pick({ accept: "image/*,video/*", multiple: true })),
+        tile("📷", tx("Камера"), tx("сделать фото"), "c2", () => this.pick({ accept: "image/*", capture: "environment" })),
+        tile("🎥", tx("Видео"), tx("снять видео"), "c3", () => this.pick({ accept: "video/*", capture: "environment" })),
+        tile("📁", tx("Файлы"), tx("Диск, Загрузки"), "c4", () => this.pick({ multiple: true })),
+        tile("📍", tx("Место"), tx("где я сейчас"), "c5", () => this.sendLocation()),
       ];
       // Контакты из телефонной книги умеет отдавать только Chrome на Android.
       if ("contacts" in navigator && "ContactsManager" in window) {
-        tiles.push(tile("👤", "Контакт", "из телефона", "c6", () => this.sendContact()));
+        tiles.push(tile("👤", tx("Контакт"), tx("из телефона"), "c6", () => this.sendContact()));
       }
       if (navigator.clipboard && navigator.clipboard.read) {
-        tiles.push(tile("📋", "Вставить", "что скопировал", "c7", () => this.pasteClipboard()));
+        tiles.push(tile("📋", tx("Вставить"), tx("что скопировал"), "c7", () => this.pasteClipboard()));
       }
       const back = el("div", { class: "at-back", onclick: (e) => { if (e.target === back) close(); } },
-        el("div", { class: "at-sheet", role: "dialog", "aria-label": "Прикрепить" },
+        el("div", { class: "at-sheet", role: "dialog", "aria-label": tx("Прикрепить") },
           el("div", { class: "at-grip" }),
           el("div", { class: "at-grid" }, ...tiles)));
       document.body.append(back);
@@ -458,17 +458,17 @@ window.PD = (() => {
     }
 
     sendLocation() {
-      if (!navigator.geolocation) return toast("Это устройство не умеет определять место", true);
-      toast("Определяю, где ты…");
+      if (!navigator.geolocation) return toast(tx("Это устройство не умеет определять место"), true);
+      toast(tx("Определяю, где ты…"));
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           const { latitude, longitude, accuracy } = pos.coords;
           const url = `https://maps.google.com/?q=${latitude.toFixed(6)},${longitude.toFixed(6)}`;
-          this.sendTextValue(`📍 Я здесь (точность ~${Math.round(accuracy)} м)\n${url}`);
+          this.sendTextValue(tx("📍 Я здесь (точность ~{0} м)\n{1}", Math.round(accuracy), url));
         },
         (err) => toast(err.code === 1
-          ? "Нет доступа к геолокации — разреши его для сайта в настройках"
-          : "Не получилось определить место, попробуй ещё раз", true),
+          ? tx("Нет доступа к геолокации — разреши его для сайта в настройках")
+          : tx("Не получилось определить место, попробуй ещё раз"), true),
         { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 },
       );
     }
@@ -479,12 +479,12 @@ window.PD = (() => {
         const props = ["name", "tel", "email"].filter((p) => supported.includes(p));
         const [c] = await navigator.contacts.select(props, { multiple: false });
         if (!c) return;
-        const lines = ["👤 " + ((c.name && c.name[0]) || "Контакт")];
+        const lines = ["👤 " + ((c.name && c.name[0]) || tx("Контакт"))];
         for (const tel of c.tel || []) lines.push("📞 " + tel);
         for (const mail of c.email || []) lines.push("✉️ " + mail);
         await this.sendTextValue(lines.join("\n"));
       } catch {
-        toast("Не получилось открыть контакты", true);
+        toast(tx("Не получилось открыть контакты"), true);
       }
     }
 
@@ -498,18 +498,18 @@ window.PD = (() => {
           const type = item.types.find((t) => t.startsWith("image/"));
           if (type) {
             const blob = await item.getType(type);
-            files.push(new File([blob], `Вставка ${new Date().toLocaleTimeString("ru-RU").replace(/:/g, "-")}.${type.split("/")[1]}`, { type }));
+            files.push(new File([blob], tx("Вставка {0}.{1}", new Date().toLocaleTimeString(PDI18N.locale).replace(/:/g, "-"), type.split("/")[1]), { type }));
           } else if (item.types.includes("text/plain")) {
             text += await (await item.getType("text/plain")).text();
           }
         }
         if (files.length) return this.sendFiles(files);
-        if (!text.trim()) return toast("В буфере ничего нет");
+        if (!text.trim()) return toast(tx("В буфере ничего нет"));
         this.input.value = this.input.value ? `${this.input.value} ${text}` : text;
         this._resize();
         this.input.focus();
       } catch {
-        toast("Браузер не дал прочитать буфер — разреши доступ", true);
+        toast(tx("Браузер не дал прочитать буфер — разреши доступ"), true);
       }
     }
 
@@ -529,19 +529,19 @@ window.PD = (() => {
       if (!files.length) return;
       const total = files.reduce((sum, f) => sum + f.size, 0);
       if (total > this.maxUploadMb * 1024 * 1024) {
-        toast(`Слишком большой размер. Лимит ${this.maxUploadMb} МБ за раз`, true);
+        toast(tx("Слишком большой размер. Лимит {0} МБ за раз", this.maxUploadMb), true);
         return;
       }
       const fd = new FormData();
       for (const f of files) fd.append("files", f, f.name || "file");
-      const label = files.length === 1 ? files[0].name || "Файл" : `Файлов: ${files.length}`;
+      const label = files.length === 1 ? files[0].name || tx("Файл") : tx("Файлов: {0}", files.length);
       await this.upload(fd, `${label} · ${fmtSize(total)}`);
     }
 
     pending(label) {
       const bar = el("div");
       const node = el("div", { class: "msg out pending" },
-        el("div", { class: "bubble" }, el("div", { class: "fsize" }, "Отправка: " + label),
+        el("div", { class: "bubble" }, el("div", { class: "fsize" }, tx("Отправка: ") + label),
           el("div", { class: "progress" }, bar)));
       this.list.append(node);
       this.updateEmpty();
@@ -552,7 +552,7 @@ window.PD = (() => {
     // XMLHttpRequest вместо fetch — ради полоски прогресса на больших видео.
     upload(formData, label) {
       if (this.role === "phone" && !this.chatId) {
-        toast("Сначала открой чат с компьютером", true);
+        toast(tx("Сначала открой чат с компьютером"), true);
         return Promise.resolve(false);
       }
       const p = label ? this.pending(label) : null;
@@ -570,12 +570,12 @@ window.PD = (() => {
             data.messages.forEach((m) => this.add(m));
             resolve(true);
           } else {
-            toast((data && data.detail) || "Ошибка отправки (" + xhr.status + ")", true);
+            toast((data && data.detail) || tx("Ошибка отправки (") + xhr.status + ")", true);
             if (xhr.status === 401) this.opts.onClosed?.("unauthorized");
             resolve(false);
           }
         };
-        xhr.onerror = () => { p?.remove(); toast("Нет связи с сервером", true); resolve(false); };
+        xhr.onerror = () => { p?.remove(); toast(tx("Нет связи с сервером"), true); resolve(false); };
         xhr.send(formData);
       });
     }
@@ -583,14 +583,14 @@ window.PD = (() => {
     // ------------------------------------------------ голосовые
     async startRecording() {
       if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-        toast("Запись голоса недоступна (нужен HTTPS и современный браузер)", true);
+        toast(tx("Запись голоса недоступна (нужен HTTPS и современный браузер)"), true);
         return;
       }
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch {
-        toast("Нет доступа к микрофону. Разреши его в настройках браузера", true);
+        toast(tx("Нет доступа к микрофону. Разреши его в настройках браузера"), true);
         return;
       }
       const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
@@ -626,7 +626,7 @@ window.PD = (() => {
       const fd = new FormData();
       fd.append("voice", blob, name);
       fd.append("duration", seconds.toFixed(1));
-      this.upload(fd, "голосовое " + fmtDuration(seconds));
+      this.upload(fd, tx("голосовое ") + fmtDuration(seconds));
     }
 
     stopRecording(send) {
@@ -767,14 +767,14 @@ window.PD = (() => {
       },
     };
     // Кнопки «🔊 Звук сообщений» в меню (на каждой странице свои, работают одинаково).
-    const label = () => (enabled() ? "🔊 Звук сообщений: включён" : "🔇 Звук сообщений: выключен");
+    const label = () => (enabled() ? tx("🔊 Звук сообщений: включён") : tx("🔇 Звук сообщений: выключен"));
     for (const btn of document.querySelectorAll("[data-sound-toggle]")) {
       btn.textContent = label();
       btn.addEventListener("click", () => {
         api_.set(!enabled());
         document.querySelectorAll("[data-sound-toggle]").forEach((b) => (b.textContent = label()));
         if (enabled()) { unlock(); setTimeout(() => play("alert"), 50); }
-        toast(enabled() ? "Звук включён" : "Звук выключен");
+        toast(enabled() ? tx("Звук включён") : tx("Звук выключен"));
       });
     }
     if ("serviceWorker" in navigator) {
@@ -824,9 +824,9 @@ window.PD = (() => {
 
     // Вызывается по нажатию кнопки: браузер спросит разрешение.
     async enable(role, key) {
-      if (!push.supported()) throw new Error("Этот браузер не поддерживает уведомления");
+      if (!push.supported()) throw new Error(tx("Этот браузер не поддерживает уведомления"));
       const permission = await Notification.requestPermission();
-      if (permission !== "granted") throw new Error("Уведомления запрещены. Разреши их в настройках браузера");
+      if (permission !== "granted") throw new Error(tx("Уведомления запрещены. Разреши их в настройках браузера"));
       await push.subscribe(role, key);
     },
 

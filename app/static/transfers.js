@@ -20,7 +20,7 @@ window.PDPcChat = (() => {
 
   function fmtLeft(expires) {
     const h = Math.max(0, (expires * 1000 - Date.now()) / 3600e3);
-    return h >= 1 ? `удалится через ${Math.floor(h)} ч` : `удалится через ${Math.max(1, Math.round(h * 60))} мин`;
+    return h >= 1 ? tx("удалится через {0} ч", Math.floor(h)) : tx("удалится через {0} мин", Math.max(1, Math.round(h * 60)));
   }
 
   // ---------- данные с сервера
@@ -54,7 +54,7 @@ window.PDPcChat = (() => {
     const body = [el("div", { class: "ext" }, ext),
       el("div", { class: "finfo" }, el("div", { class: "fname" }, t.name), el("div", { class: "fsize" }, status))];
     return t.url && t.direction === "in"
-      ? el("a", { class: "file-row", href: t.url, download: t.name, title: "Скачать" }, ...body)
+      ? el("a", { class: "file-row", href: t.url, download: t.name, title: tx("Скачать") }, ...body)
       : el("div", { class: "file-row" }, ...body);
   }
 
@@ -63,17 +63,17 @@ window.PDPcChat = (() => {
     const job = active.get(t.id);
     let status;
     if (!out) status = `${fmtSize(t.size)} · ${fmtLeft(t.expires)}`;
-    else if (t.done) status = `${fmtSize(t.size)} · ✅ доставлено · ${fmtLeft(t.expires)}`;
-    else if (!job) status = "⏸ Загрузка прервана — выбери этот же файл, чтобы продолжить";
+    else if (t.done) status = tx("{0} · ✅ доставлено · {1}", fmtSize(t.size), fmtLeft(t.expires));
+    else if (!job) status = tx("⏸ Загрузка прервана — выбери этот же файл, чтобы продолжить");
     else status = PDUpload.statusText(job, t.size, fmtSize);
     const actions = el("div", { class: "actions" });
-    if (!out) actions.append(el("a", { href: t.url, download: t.name }, "Скачать"));
+    if (!out) actions.append(el("a", { href: t.url, download: t.name }, tx("Скачать")));
     if (out && !t.done) {
-      if (job && job.state !== "paused") actions.append(el("button", { type: "button", onclick: () => job.pause() }, "⏸ Пауза"));
-      else if (job) actions.append(el("button", { type: "button", onclick: () => resume(t) }, "▶ Продолжить"));
-      else actions.append(el("button", { type: "button", onclick: () => pickToResume(t) }, "📂 Выбрать файл"));
+      if (job && job.state !== "paused") actions.append(el("button", { type: "button", onclick: () => job.pause() }, tx("⏸ Пауза")));
+      else if (job) actions.append(el("button", { type: "button", onclick: () => resume(t) }, tx("▶ Продолжить")));
+      else actions.append(el("button", { type: "button", onclick: () => pickToResume(t) }, tx("📂 Выбрать файл")));
     }
-    actions.append(el("button", { type: "button", class: "del", onclick: () => remove(t) }, out && !t.done ? "Отменить" : "Удалить"));
+    actions.append(el("button", { type: "button", class: "del", onclick: () => remove(t) }, out && !t.done ? tx("Отменить") : tx("Удалить")));
     const parts = [fileRow(t, status)];
     if (out && !t.done) parts.push(el("div", { class: "progress" }, el("div", { class: "tr-bar" })));
     parts.push(actions, el("div", { class: "meta" }, fmtTime(t.created)));
@@ -91,14 +91,14 @@ window.PDPcChat = (() => {
     const d = devices.find((x) => x.id === peer);
     if (!d) { peer = null; changed(); return; }
     $("pcPeerName").textContent = d.label;
-    $("pcPeerStatus").textContent = d.online ? "в сети" : "не в сети — файл дождётся";
-    $("pcLimits").textContent = `До ${Math.round(info.max_mb / 1024)} ГБ за файл · хранится ${info.ttl_hours} ч`;
+    $("pcPeerStatus").textContent = d.online ? tx("в сети") : tx("не в сети — файл дождётся");
+    $("pcLimits").textContent = tx("До {0} ГБ за файл · хранится {1} ч", Math.round(info.max_mb / 1024), info.ttl_hours);
     const list = $("pcItems");
     const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 200;
     const rows = items();
     list.replaceChildren(...(rows.length ? rows.map(bubble) : [el("div", { class: "empty" },
-      el("div", { class: "big" }, "📦"), el("b", {}, "Пока пусто"),
-      `Перетащи файл в это окно или нажми «📎 Отправить файл» — он придёт на «${d.label}». До 10 ГБ, хранится сутки.`)]));
+      el("div", { class: "big" }, "📦"), el("b", {}, tx("Пока пусто")),
+      tx("Перетащи файл в это окно или нажми «📎 Отправить файл» — он придёт на «{0}». До 10 ГБ, хранится сутки.", d.label))]));
     rows.forEach(setBar);
     if (nearBottom) list.scrollTop = list.scrollHeight;
   }
@@ -147,7 +147,7 @@ window.PDPcChat = (() => {
   }
 
   async function remove(t) {
-    if (!confirm(t.direction === "in" ? "Удалить файл с сервера?" : "Отменить передачу и удалить файл с сервера?")) return;
+    if (!confirm(t.direction === "in" ? tx("Удалить файл с сервера?") : tx("Отменить передачу и удалить файл с сервера?"))) return;
     const job = active.get(t.id);
     if (job) { job.pause(); active.delete(t.id); }
     try { await api(ROLE, `/api/transfers/${t.id}`, { method: "DELETE" }); } catch (e) { toast(e.message, true); }
@@ -157,7 +157,7 @@ window.PDPcChat = (() => {
   async function send(files) {
     const to = peer;
     for (const file of [...files]) {
-      if (!file.size) { toast(`«${file.name}» пустой — пропускаю`, true); continue; }
+      if (!file.size) { toast(tx("«{0}» пустой — пропускаю", file.name), true); continue; }
       let t;
       try {
         t = await api(ROLE, "/api/transfers", {

@@ -19,11 +19,11 @@
     enterSends: false, // на телефоне Enter — новая строка, отправка кнопкой
     onEvent,
     onClosed: (reason) => reason === "relinked"
-      ? showGate("Чаты открыты на другом телефоне",
-        "Если это был не ты — на своём компьютере нажми «📱 Переподключить телефон» и отсканируй код этим телефоном.")
+      ? showGate(tx("Чаты открыты на другом телефоне"),
+        tx("Если это был не ты — на своём компьютере нажми «📱 Переподключить телефон» и отсканируй код этим телефоном."))
       : showGate(),
     onResync: async () => { await loadChats(); if (openId) openChat(openId, false); },
-    onConnection: (ok) => { if (!ok && openId) $("pcStatus").textContent = "нет связи с сервером…"; },
+    onConnection: (ok) => { if (!ok && openId) $("pcStatus").textContent = tx("нет связи с сервером…"); },
   });
 
   // Нажали на баннер о новом сообщении: чат с компьютером открываем здесь же, чат с человеком — его страницей.
@@ -42,8 +42,8 @@
     $("chatList").hidden = $("fabAdd").hidden = $("pushBanner").hidden = $("googleBanner").hidden = true;
     $("tabs").hidden = $("toolsHome").hidden = true;
     $("gate").hidden = false;
-    $("gateTitle").textContent = title || "Добро пожаловать";
-    $("gateText").textContent = text || "Войди через Google — и пользуйся без компьютера. Или открой PhoneDrop на своём компьютере и отсканируй QR-код.";
+    $("gateTitle").textContent = title || tx("Добро пожаловать");
+    $("gateText").textContent = text || tx("Войди через Google — и пользуйся без компьютера. Или открой PhoneDrop на своём компьютере и отсканируй QR-код.");
     // Кнопку Google показываем, только если вход через Google настроен на сервере.
     fetch("/api/login-info").then((r) => r.json()).then((d) => { $("gateGoogle").hidden = !d.google; }).catch(() => {});
     $("gateInstall").hidden = !installEvent;
@@ -61,9 +61,9 @@
   }
 
   function modeText(c) {
-    return c.mode === "remember" ? "🔒 постоянный — переписка хранится" : "⏳ временный — удалится после закрытия";
+    return c.mode === "remember" ? tx("🔒 постоянный — переписка хранится") : tx("⏳ временный — удалится после закрытия");
   }
-  const PLACES = [["home", "🏠 Дом"], ["work", "🏢 Работа"], ["", "💻 Другие компьютеры"]];
+  const PLACES = [["home", tx("🏠 Дом")], ["work", tx("🏢 Работа")], ["", tx("💻 Другие компьютеры")]];
 
   function setTab(name) {
     tab = name;
@@ -83,12 +83,12 @@
     const tools = tab === "tools";
     $("toolsHome").hidden = !tools;
     $("chatList").hidden = $("fabAdd").hidden = tools;
-    $("listView").querySelector(".status").textContent = tools ? "инструменты" : "чаты";
+    $("listView").querySelector(".status").textContent = tools ? tx("инструменты") : tx("чаты");
     const acc = !guest && info && info.account;
     $("googleBanner").hidden = !(info && info.google && acc && !acc.google);
     $("pushBanner").hidden = tools || !$("googleBanner").hidden || !((chats.length || guest) && push.status() === "default");
     $("menuAccount").hidden = guest ? !guest.google : !(info && info.google);
-    $("menuAccount").textContent = guest ? "🔐 Войти через Google" : acc && acc.google ? `👤 ${acc.email} · выйти` : "🔐 Привязать Google";
+    $("menuAccount").textContent = guest ? tx("🔐 Войти через Google") : acc && acc.google ? tx("👤 {0} · выйти", acc.email) : tx("🔐 Привязать Google");
     $("menuUsers").hidden = !(acc && acc.admin);
     if (tools) {
       PDTools.renderHome($("toolsHome"), (id) => openTool(id));
@@ -98,26 +98,26 @@
     const list = $("chatList");
     list.replaceChildren();
     if (guest) {  // собеседник по коду: только его чаты с людьми
-      list.append(el("div", { class: "ci-section" }, "👥 Мои чаты"));
+      list.append(el("div", { class: "ci-section" }, tx("👥 Мои чаты")));
       for (const r of rooms) list.append(roomRow(r));
       return;
     }
     if (!chats.length && !rooms.length) {
       list.append(el("div", { class: "empty list-empty" },
-        el("div", { class: "big" }, "💬"), el("b", {}, "Пока нет чатов"),
-        "Нажми ＋ внизу: подключи свой компьютер по QR-коду или начни чат с человеком по коду."));
+        el("div", { class: "big" }, "💬"), el("b", {}, tx("Пока нет чатов")),
+        tx("Нажми ＋ внизу: подключи свой компьютер по QR-коду или начни чат с человеком по коду.")));
       return;
     }
     // Компьютеры — по местам: дом, работа, остальные
     if (!chats.length) {
-      list.append(el("div", { class: "ci-section" }, "💻 Мои компьютеры"));
-      list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Мой компьютер» и отсканируй QR-код на экране компьютера."));
+      list.append(el("div", { class: "ci-section" }, tx("💻 Мои компьютеры")));
+      list.append(el("p", { class: "ci-hint" }, tx("Нажми ＋ внизу → «Мой компьютер» и отсканируй QR-код на экране компьютера.")));
     }
     const grouped = PLACES.filter(([key]) => chats.some((c) => (c.place || "") === key));
     for (const [key, title] of grouped) {
-      list.append(el("div", { class: "ci-section" }, grouped.length === 1 && !key ? "💻 Мои компьютеры" : title));
+      list.append(el("div", { class: "ci-section" }, grouped.length === 1 && !key ? tx("💻 Мои компьютеры") : title));
       for (const c of chats.filter((x) => (x.place || "") === key)) {
-        const preview = c.last ? (c.last.sender === "phone" ? "Вы: " : "") + c.last.preview : modeText(c);
+        const preview = c.last ? (c.last.sender === "phone" ? tx("Вы: ") : "") + c.last.preview : modeText(c);
         list.append(el("button", { class: "chat-item", type: "button", onclick: () => openChat(c.id) },
           el("div", { class: "avatar" }, monitorIcon(), c.pc_online ? el("span", { class: "online" }) : null),
           el("div", { class: "ci-main" },
@@ -131,8 +131,8 @@
       }
     }
     // Люди
-    list.append(el("div", { class: "ci-section" }, "👥 Люди"));
-    if (!rooms.length) list.append(el("p", { class: "ci-hint" }, "Нажми ＋ внизу → «Чат с человеком»: переписка и файлы до 10 ГБ по коду, без регистрации."));
+    list.append(el("div", { class: "ci-section" }, tx("👥 Люди")));
+    if (!rooms.length) list.append(el("p", { class: "ci-hint" }, tx("Нажми ＋ внизу → «Чат с человеком»: переписка и файлы до 10 ГБ по коду, без регистрации.")));
     for (const r of rooms) list.append(roomRow(r));
   }
 
@@ -151,7 +151,7 @@
   async function loadChats() {
     if (guest) {
       guest = await api(ROLE, "/api/guest/rooms");
-      if (!guest.rooms.length) { guest = null; throw Object.assign(new Error("нет чатов"), { status: 401 }); }
+      if (!guest.rooms.length) { guest = null; throw Object.assign(new Error(tx("нет чатов")), { status: 401 }); }
       if (!openId) renderList();
       return;
     }
@@ -178,9 +178,9 @@
 
   function setHeader(c) {
     $("pcName").textContent = c.label;
-    $("pcStatus").textContent = c.pc_online ? "в сети" : c.mode === "remember"
-      ? "не в сети — сообщение дождётся"
-      : "не в сети — чат удалится через минуту";
+    $("pcStatus").textContent = c.pc_online ? tx("в сети") : c.mode === "remember"
+      ? tx("не в сети — сообщение дождётся")
+      : tx("не в сети — чат удалится через минуту");
   }
 
   async function openChat(id, pushHistory = true) {
@@ -232,11 +232,11 @@
         else if (!openId) renderList();
       }
     } else if (msg.type === "chat_removed") {
-      const reasons = { pc_closed: "Компьютер отключён — переписка удалена",
-        pc_left: "Вкладку на чужом компьютере закрыли — переписка удалена",
-        expired: "Компьютер долго не использовался и был отключён" };
+      const reasons = { pc_closed: tx("Компьютер отключён — переписка удалена"),
+        pc_left: tx("Вкладку на чужом компьютере закрыли — переписка удалена"),
+        expired: tx("Компьютер долго не использовался и был отключён") };
       if (msg.chat_id === openId) {
-        toast(reasons[msg.reason] || "Чат удалён");
+        toast(reasons[msg.reason] || tx("Чат удалён"));
         showList(true);
       } else reloadSoon();
     } else if (msg.type === "renamed") {
@@ -262,7 +262,7 @@
   // ---------- старт
   // После входа через Google сервер возвращает сюда с ?login=ok или ?login_error=…
   if (params.get("login_error")) toast(params.get("login_error"), true);
-  else if (params.get("login") === "ok") toast("Вход выполнен ✅");
+  else if (params.get("login") === "ok") toast(tx("Вход выполнен ✅"));
   if (params.has("login") || params.has("login_error")) history.replaceState(null, "", "/chat");
 
   $("menuUsers").addEventListener("click", () => PDAdmin.open());
@@ -270,10 +270,10 @@
     if (guest) { location.href = "/auth/google?role=phone"; return; }
     const acc = info && info.account;
     if (!acc || !acc.google) { location.href = "/auth/google?role=phone"; return; }
-    if (!confirm(`Выйти из ${acc.email} на этом телефоне? Войти снова можно через Google.`)) return;
+    if (!confirm(tx("Выйти из {0} на этом телефоне? Войти снова можно через Google.", acc.email))) return;
     try { await api(ROLE, "/api/phone/logout", { method: "POST" }); } catch (e) { return toast(e.message, true); }
     chats = [];
-    showGate("Ты вышел", "Войди через Google, чтобы вернуться к своим чатам.");
+    showGate(tx("Ты вышел"), tx("Войди через Google, чтобы вернуться к своим чатам."));
   });
 
   async function start() {
@@ -285,16 +285,16 @@
       try {
         const res = await api(ROLE, `/api/pair/${match[1]}`, { method: "POST" });
         target = res.chat_id;
-        toast(res.relinked ? "Телефон переподключён — все чаты на месте" : "Компьютер подключён");
+        toast(res.relinked ? tx("Телефон переподключён — все чаты на месте") : tx("Компьютер подключён"));
       } catch (e) {
         try { await loadChats(); } catch { /* аккаунта ещё нет */ }
         if (chats.length) { toast(e.message, true); chat.connect(); return; }
-        return showGate("Не удалось подключиться", e.message);
+        return showGate(tx("Не удалось подключиться"), e.message);
       }
     }
     if (params.get("share") === "nosession") {
       history.replaceState(null, "", "/chat");
-      return showGate("Некуда отправить", "Сначала подключи компьютер по QR-коду, потом поделись файлом ещё раз.");
+      return showGate(tx("Некуда отправить"), tx("Сначала подключи компьютер по QR-коду, потом поделись файлом ещё раз."));
     }
     try {
       await loadChats();
@@ -329,7 +329,7 @@
       await openChat(target);
     }
     if (shared !== null) {
-      toast(shared === "0" ? "Нечего было отправить" : `Отправлено на компьютер: ${shared}`, shared === "0");
+      toast(shared === "0" ? tx("Нечего было отправить") : tx("Отправлено на компьютер: {0}", shared), shared === "0");
     }
   }
 
@@ -367,7 +367,7 @@
 
   $("renameBtn").addEventListener("click", async () => {
     const current = chats.find((c) => c.id === openId);
-    const name = prompt("Как назвать этот компьютер? Например: Рабочий ноутбук", current ? current.label : "");
+    const name = prompt(tx("Как назвать этот компьютер? Например: Рабочий ноутбук"), current ? current.label : "");
     if (!name || !name.trim()) return;
     try {
       const { label } = await api(ROLE, `/api/chats/${openId}/rename`, {
@@ -390,17 +390,17 @@
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ place }),
         });
         if (current) current.place = place;
-        toast("Готово — в списке компьютер будет в этом разделе");
+        toast(tx("Готово — в списке компьютер будет в этом разделе"));
       } catch (e) {
         toast(e.message, true);
       }
     };
     const backdrop = el("div", { class: "sheet-backdrop", onclick: (e) => e.target === backdrop && close() },
-      el("div", { class: "sheet" }, el("h3", {}, "Где стоит этот компьютер?"),
+      el("div", { class: "sheet" }, el("h3", {}, tx("Где стоит этот компьютер?")),
         ...PLACES.map(([key, title]) => el("button", { type: "button", onclick: pick(key) },
-          el("span", {}, key ? title : "💻 Не важно"),
+          el("span", {}, key ? title : tx("💻 Не важно")),
           current && (current.place || "") === key ? el("span", { class: "sheet-online" }, "✓") : null)),
-        el("button", { type: "button", class: "cancel", onclick: close }, "Отмена")));
+        el("button", { type: "button", class: "cancel", onclick: close }, tx("Отмена"))));
     document.body.append(backdrop);
   });
 
@@ -408,13 +408,13 @@
   // Сканируем его — и этот браузер получает старый чат со всей перепиской.
   $("reattachBtn").addEventListener("click", () => {
     const chatId = openId;
-    toast("Открой PhoneDrop на компьютере и наведи камеру на QR-код");
+    toast(tx("Открой PhoneDrop на компьютере и наведи камеру на QR-код"));
     openScanner(async (code) => {
       try {
         const { label } = await api(ROLE, `/api/chats/${chatId}/reattach`, {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
         });
-        toast(`«${label}» переподключён — переписка на месте`);
+        toast(tx("«{0}» переподключён — переписка на месте", label));
         await loadChats();
         if (openId === chatId) openChat(chatId, false);
       } catch (e) {
@@ -424,10 +424,10 @@
   });
 
   $("removeBtn").addEventListener("click", async () => {
-    if (!confirm("Отключить этот компьютер? Переписка и файлы удалятся с сервера.")) return;
+    if (!confirm(tx("Отключить этот компьютер? Переписка и файлы удалятся с сервера."))) return;
     try {
       await api(ROLE, `/api/chats/${openId}`, { method: "DELETE" });
-      toast("Компьютер отключён");
+      toast(tx("Компьютер отключён"));
     } catch (e) {
       toast(e.message, true);
     }
@@ -437,7 +437,7 @@
   async function enablePush() {
     try {
       await push.enable(ROLE, guest ? guest.vapid_key : info.vapid_key);
-      toast("Уведомления включены");
+      toast(tx("Уведомления включены"));
     } catch (e) {
       toast(e.message, true);
     }
@@ -446,9 +446,9 @@
   $("pushBannerBtn").addEventListener("click", enablePush);
   function pushMenu() {
     const status = push.status();
-    if (status === "granted") toast("Уведомления уже включены ✅");
-    else if (status === "unsupported") toast("Этот браузер не поддерживает уведомления", true);
-    else if (status === "denied") toast("Уведомления запрещены. Разреши их в настройках сайта в Chrome", true);
+    if (status === "granted") toast(tx("Уведомления уже включены ✅"));
+    else if (status === "unsupported") toast(tx("Этот браузер не поддерживает уведомления"), true);
+    else if (status === "denied") toast(tx("Уведомления запрещены. Разреши их в настройках сайта в Chrome"), true);
     else enablePush();
   }
   $("menuPush").addEventListener("click", pushMenu);
@@ -465,7 +465,7 @@
       const s = document.createElement("script");
       s.src = "/static/vendor/jsQR.min.js";
       s.onload = resolve;
-      s.onerror = () => { jsqrLoading = null; reject(new Error("Не загрузился сканер — проверь интернет")); };
+      s.onerror = () => { jsqrLoading = null; reject(new Error(tx("Не загрузился сканер — проверь интернет"))); };
       document.head.append(s);
     });
     return jsqrLoading;
@@ -473,14 +473,14 @@
   // onPair(код) — что делать с найденным кодом. Без него — обычное подключение нового компьютера.
   async function openScanner(onPair) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      toast("Камера недоступна в этом браузере — наведи обычную камеру телефона на QR-код", true);
+      toast(tx("Камера недоступна в этом браузере — наведи обычную камеру телефона на QR-код"), true);
       return;
     }
     try { await loadJsQR(); } catch (e) { toast(e.message, true); return; }
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     } catch {
-      toast("Нет доступа к камере. Разреши его в настройках браузера", true);
+      toast(tx("Нет доступа к камере. Разреши его в настройках браузера"), true);
       return;
     }
     const video = $("cam");
@@ -535,10 +535,10 @@
       el("span", { class: "add-item" }, el("b", {}, text), el("small", {}, sub)));
     const backdrop = el("div", { class: "sheet-backdrop", onclick: (e) => e.target === backdrop && close() },
       el("div", { class: "sheet" },
-        el("h3", {}, "Новый чат"),
-        item("💻 Мой компьютер", "Открой PhoneDrop на компьютере и отсканируй QR-код", () => openScanner()),
-        item("👤 Чат с человеком", "Получишь код — собеседник введёт его на сайте", () => PDPeople.askNewChat()),
-        el("button", { type: "button", class: "cancel", onclick: close }, "Отмена")));
+        el("h3", {}, tx("Новый чат")),
+        item(tx("💻 Мой компьютер"), tx("Открой PhoneDrop на компьютере и отсканируй QR-код"), () => openScanner()),
+        item(tx("👤 Чат с человеком"), tx("Получишь код — собеседник введёт его на сайте"), () => PDPeople.askNewChat()),
+        el("button", { type: "button", class: "cancel", onclick: close }, tx("Отмена"))));
     document.body.append(backdrop);
   });
   $("scanClose").addEventListener("click", closeScanner);

@@ -13,44 +13,44 @@ window.PDTools = (() => {
 
   const TOOLS = [
     {
-      id: "scan", op: "scan", icon: "📷", title: "Сканер документов",
-      sub: "Фото страниц → ровный PDF",
-      hint: "Сфотографируй страницы — лист найдётся сам. Нажми на страницу, чтобы поправить.",
+      id: "scan", op: "scan", icon: "📷", title: tx("Сканер документов"),
+      sub: tx("Фото страниц → ровный PDF"),
+      hint: tx("Сфотографируй страницы — лист найдётся сам. Нажми на страницу, чтобы поправить."),
       camera: true, scanner: true, accept: IMAGE_ACCEPT, multi: true, arrange: true, rotate: true, min: 1,
-      action: "Сделать PDF",
+      action: tx("Сделать PDF"),
     },
     {
-      id: "office", op: "office-pdf", icon: "📄", title: "Документ → PDF",
+      id: "office", op: "office-pdf", icon: "📄", title: tx("Документ → PDF"),
       sub: "Word, Excel, PowerPoint",
-      hint: "Выбери файл Word, Excel или PowerPoint — получишь PDF, который откроется на любом устройстве.",
-      accept: OFFICE_ACCEPT, multi: false, min: 1, action: "Превратить в PDF",
+      hint: tx("Выбери файл Word, Excel или PowerPoint — получишь PDF, который откроется на любом устройстве."),
+      accept: OFFICE_ACCEPT, multi: false, min: 1, action: tx("Превратить в PDF"),
     },
     {
-      id: "compresspdf", op: "compress-pdf", icon: "🪶", title: "Сжать PDF",
-      sub: "Тяжёлый PDF → лёгкий",
-      hint: "Например, скан из почты на 20 МБ. Картинки внутри пережимаются, текст остаётся текстом — его можно выделять и искать.",
-      accept: "application/pdf,.pdf", multi: false, min: 1, action: "Сжать PDF",
-      options: { key: "preset", def: "normal", choices: [["light", "Маленький"], ["normal", "Средний"], ["max", "Высокое качество"]] },
+      id: "compresspdf", op: "compress-pdf", icon: "🪶", title: tx("Сжать PDF"),
+      sub: tx("Тяжёлый PDF → лёгкий"),
+      hint: tx("Например, скан из почты на 20 МБ. Картинки внутри пережимаются, текст остаётся текстом — его можно выделять и искать."),
+      accept: "application/pdf,.pdf", multi: false, min: 1, action: tx("Сжать PDF"),
+      options: { key: "preset", def: "normal", choices: [["light", tx("Маленький")], ["normal", tx("Средний")], ["max", tx("Высокое качество")]] },
     },
     {
-      id: "merge", op: "merge-pdf", icon: "📎", title: "Объединить PDF",
-      sub: "Несколько PDF → один",
-      hint: "Выбери два или больше PDF и расставь в нужном порядке.",
-      accept: "application/pdf,.pdf", multi: true, arrange: true, min: 2, action: "Объединить",
+      id: "merge", op: "merge-pdf", icon: "📎", title: tx("Объединить PDF"),
+      sub: tx("Несколько PDF → один"),
+      hint: tx("Выбери два или больше PDF и расставь в нужном порядке."),
+      accept: "application/pdf,.pdf", multi: true, arrange: true, min: 2, action: tx("Объединить"),
     },
     {
-      id: "pdfimg", op: "pdf-images", icon: "🖼", title: "PDF → картинки",
-      sub: "Каждая страница — отдельный JPG",
-      hint: "Удобно, чтобы отправить страницу документа как фото.",
-      accept: "application/pdf,.pdf", multi: false, min: 1, action: "Сделать картинки",
+      id: "pdfimg", op: "pdf-images", icon: "🖼", title: tx("PDF → картинки"),
+      sub: tx("Каждая страница — отдельный JPG"),
+      hint: tx("Удобно, чтобы отправить страницу документа как фото."),
+      accept: "application/pdf,.pdf", multi: false, min: 1, action: tx("Сделать картинки"),
     },
     {
-      id: "compress", op: "images-jpg", icon: "🗜", title: "Сжать фото / HEIC → JPG",
-      sub: "Меньше размер, без геолокации",
-      hint: "Фото станут легче для почты и мессенджеров. Из них удаляются геолокация и данные телефона.",
+      id: "compress", op: "images-jpg", icon: "🗜", title: tx("Сжать фото / HEIC → JPG"),
+      sub: tx("Меньше размер, без геолокации"),
+      hint: tx("Фото станут легче для почты и мессенджеров. Из них удаляются геолокация и данные телефона."),
       accept: IMAGE_ACCEPT, multi: true, min: 1,
-      options: { key: "preset", def: "email", choices: [["email", "Для почты"], ["small", "Сильнее"], ["original", "Только в JPG"]] },
-      action: "Сжать",
+      options: { key: "preset", def: "email", choices: [["email", tx("Для почты")], ["small", tx("Сильнее")], ["original", tx("Только в JPG")]] },
+      action: tx("Сжать"),
     },
   ];
 
@@ -73,7 +73,7 @@ window.PDTools = (() => {
           el("b", {}, t.title),
           el("span", { class: "tool-sub" }, t.sub)))),
       el("p", { class: "tools-note" },
-        "🔒 Файлы обрабатываются на твоём сервере PhoneDrop, не на чужих сайтах. Результат хранится 30 минут и удаляется."));
+        tx("🔒 Файлы обрабатываются на твоём сервере PhoneDrop, не на чужих сайтах. Результат хранится 30 минут и удаляется.")));
   }
 
   // ---------- экран инструмента
@@ -94,11 +94,11 @@ window.PDTools = (() => {
     $("toolIcon").textContent = tool.icon;
     $("toolTitle").textContent = tool.title;
     $("toolSub").textContent = tool.sub;
-    $("toolHint").textContent = tool.hint + (ON_PC ? " Файлы можно перетащить мышкой в это окно или вставить Ctrl+V." : "");
+    $("toolHint").textContent = tool.hint + (ON_PC ? tx(" Файлы можно перетащить мышкой в это окно или вставить Ctrl+V.") : "");
     for (const id of ["toolFiles", "toolAdd", "toolFoot"]) $(id).hidden = false;
     $("toolCamera").hidden = !tool.camera || ON_PC;
-    $("toolPick").textContent = tool.camera && !ON_PC ? "🖼 Галерея" : tool.multi ? "📂 Выбрать файлы" : "📂 Выбрать файл";
-    $("toolSendPc").textContent = ON_PC ? "📱 На телефон" : "💻 На компьютер";
+    $("toolPick").textContent = tool.camera && !ON_PC ? tx("🖼 Галерея") : tool.multi ? tx("📂 Выбрать файлы") : tx("📂 Выбрать файл");
+    $("toolSendPc").textContent = ON_PC ? tx("📱 На телефон") : tx("💻 На компьютер");
     $("toolSendPc").hidden = document.body.dataset.guest === "1";  // у собеседника по коду нет своих компьютеров
     const pick = $("toolPickInput");
     pick.accept = tool.accept || "";
@@ -113,7 +113,7 @@ window.PDTools = (() => {
   function renderScanSettings() {
     PDScanner.renderSettings($("scanSettings"), () => staleResults(), () => {
       const first = items.findIndex((it) => !it.uploading);
-      if (first < 0) return toast("Сначала добавь страницу", true);
+      if (first < 0) return toast(tx("Сначала добавь страницу"), true);
       editPage(first, "look");
     });
   }
@@ -134,7 +134,7 @@ window.PDTools = (() => {
     const ok = (f) => tool.accept.split(",").some((a) => a.startsWith(".")
       ? f.name.toLowerCase().endsWith(a) : a.endsWith("/*") ? f.type.startsWith(a.slice(0, -1)) : f.type === a);
     if (files.some((f) => !ok(f))) {
-      toast(tool.accept === IMAGE_ACCEPT ? "Здесь можно использовать только фото" : "Этот тип файла здесь не подходит", true);
+      toast(tool.accept === IMAGE_ACCEPT ? tx("Здесь можно использовать только фото") : tx("Этот тип файла здесь не подходит"), true);
       files = files.filter(ok);
       if (!files.length) return;
     }
@@ -145,7 +145,7 @@ window.PDTools = (() => {
       files = files.slice(0, 1);
     }
     for (const file of files) {
-      if (items.length >= MAX_FILES) { toast(`Не больше ${MAX_FILES} файлов за раз`, true); break; }
+      if (items.length >= MAX_FILES) { toast(tx("Не больше {0} файлов за раз", MAX_FILES), true); break; }
       items.push({ file, rot: 0, preview: isImage(file) ? URL.createObjectURL(file) : null });
     }
     staleResults();
@@ -157,7 +157,7 @@ window.PDTools = (() => {
     files = files.slice(0, Math.max(0, MAX_FILES - items.length));
     for (let start = 0; start < files.length; start += 20) {
       const batch = files.slice(start, start + 20);
-      const holders = batch.map((f) => ({ uploading: true, name: f.name || "фото", progress: 0 }));
+      const holders = batch.map((f) => ({ uploading: true, name: f.name || tx("фото"), progress: 0 }));
       items.push(...holders);
       uploading += batch.length;
       staleResults();
@@ -166,7 +166,7 @@ window.PDTools = (() => {
         const pages = await PDScanner.upload(batch, (p) => {
           holders.forEach((h) => (h.progress = p));
           document.querySelectorAll(".page-card.loading .page-status").forEach((n) => (n.textContent =
-            p < 1 ? `Загрузка ${Math.round(p * 100)}%` : "Ищу лист на фото…"));
+            p < 1 ? tx("Загрузка {0}%", Math.round(p * 100)) : tx("Ищу лист на фото…")));
         });
         holders.forEach((h, i) => Object.assign(h, pages[i], { uploading: false }));
       } catch (e) {
@@ -237,19 +237,19 @@ window.PDTools = (() => {
   function pageCard(item, i) {
     const busyItem = item.uploading;
     return el("div", { class: "page-card" + (busyItem ? " loading" : "") },
-      el("button", { type: "button", class: "page-thumb", disabled: busyItem, "aria-label": `Обрезать страницу ${i + 1}`,
+      el("button", { type: "button", class: "page-thumb", disabled: busyItem, "aria-label": tx("Обрезать страницу {0}", i + 1),
         onclick: () => editPage(i) },
         busyItem ? el("span", { class: "tf-spinner" })
           : el("img", { src: PDScanner.previewUrl(item, 360), alt: "", loading: "lazy" }),
         el("span", { class: "page-num" }, String(i + 1)),
-        busyItem ? el("span", { class: "page-status" }, "Загрузка…")
-          : el("span", { class: "page-status" }, "✂️ Обрезать")),
+        busyItem ? el("span", { class: "page-status" }, tx("Загрузка…"))
+          : el("span", { class: "page-status" }, tx("✂️ Обрезать"))),
       el("div", { class: "page-ctrl" },
-        el("button", { type: "button", "aria-label": "Повернуть", disabled: busyItem,
+        el("button", { type: "button", "aria-label": tx("Повернуть"), disabled: busyItem,
           onclick: () => { item.rot = (item.rot + 90) % 360; staleResults(); render(); } }, "⟳"),
-        el("button", { type: "button", "aria-label": "Раньше", disabled: i === 0, onclick: () => move(i, -1) }, "←"),
-        el("button", { type: "button", "aria-label": "Позже", disabled: i === items.length - 1, onclick: () => move(i, 1) }, "→"),
-        el("button", { type: "button", class: "del", "aria-label": "Убрать", onclick: () => removeItem(i) }, "✕")));
+        el("button", { type: "button", class: "flip-rtl", "aria-label": tx("Раньше"), disabled: i === 0, onclick: () => move(i, -1) }, "←"),
+        el("button", { type: "button", class: "flip-rtl", "aria-label": tx("Позже"), disabled: i === items.length - 1, onclick: () => move(i, 1) }, "→"),
+        el("button", { type: "button", class: "del", "aria-label": tx("Убрать"), onclick: () => removeItem(i) }, "✕")));
   }
 
   function render() {
@@ -263,26 +263,26 @@ window.PDTools = (() => {
           el("div", { class: "tf-name" }, item.file.name),
           el("div", { class: "tf-size" }, fmtSize(item.file.size))),
         el("div", { class: "tf-ctrl" },
-          tool.rotate ? el("button", { type: "button", "aria-label": "Повернуть", title: "Повернуть",
+          tool.rotate ? el("button", { type: "button", "aria-label": tx("Повернуть"), title: tx("Повернуть"),
             onclick: () => { item.rot = (item.rot + 90) % 360; staleResults(); render(); } }, "⟳") : null,
-          tool.arrange && i > 0 ? el("button", { type: "button", "aria-label": "Выше", onclick: () => move(i, -1) }, "↑") : null,
-          tool.arrange && i < items.length - 1 ? el("button", { type: "button", "aria-label": "Ниже", onclick: () => move(i, 1) }, "↓") : null,
-          el("button", { type: "button", class: "del", "aria-label": "Убрать", onclick: () => removeItem(i) }, "✕")))));
+          tool.arrange && i > 0 ? el("button", { type: "button", "aria-label": tx("Выше"), onclick: () => move(i, -1) }, "↑") : null,
+          tool.arrange && i < items.length - 1 ? el("button", { type: "button", "aria-label": tx("Ниже"), onclick: () => move(i, 1) }, "↓") : null,
+          el("button", { type: "button", class: "del", "aria-label": tx("Убрать"), onclick: () => removeItem(i) }, "✕")))));
     if (!items.length) {
-      list.append(el("div", { class: "tf-empty" }, tool.camera ? "Пока нет страниц" : "Файл ещё не выбран"));
+      list.append(el("div", { class: "tf-empty" }, tool.camera ? tx("Пока нет страниц") : tx("Файл ещё не выбран")));
     }
-    if (tool.camera) $("toolCamera").textContent = "📷 Камера";
+    if (tool.camera) $("toolCamera").textContent = tx("📷 Камера");
     const run = $("toolRun");
     run.disabled = busy || uploading > 0 || items.length < tool.min;
-    run.textContent = busy ? "Обрабатываю…" : items.length && items.length < tool.min
-      ? `Нужно ещё ${tool.min - items.length}` : tool.action;
+    run.textContent = busy ? tx("Обрабатываю…") : items.length && items.length < tool.min
+      ? tx("Нужно ещё {0}", tool.min - items.length) : tool.action;
   }
 
   // ---------- запуск
   function scanName() {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, "0");
-    return `Скан ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}`;
+    return tx("Скан {0}-{1}-{2} {3}-{4}", d.getFullYear(), pad(d.getMonth() + 1), pad(d.getDate()), pad(d.getHours()), pad(d.getMinutes()));
   }
 
   async function runScan() {
@@ -292,7 +292,7 @@ window.PDTools = (() => {
     const bar = $("toolProgress");
     bar.hidden = false;
     bar.classList.add("working");
-    $("toolRun").textContent = "Собираю PDF…";
+    $("toolRun").textContent = tx("Собираю PDF…");
     try {
       const data = await PDScanner.makePdf(items, scanName());
       results = data.results;
@@ -329,7 +329,7 @@ window.PDTools = (() => {
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
       fill.style.width = Math.round((e.loaded / e.total) * 100) + "%";
-      if (e.loaded === e.total) { bar.classList.add("working"); $("toolRun").textContent = "Конвертирую…"; }
+      if (e.loaded === e.total) { bar.classList.add("working"); $("toolRun").textContent = tx("Конвертирую…"); }
     };
     const done = () => { busy = false; bar.hidden = true; render(); };
     xhr.onload = () => {
@@ -337,13 +337,13 @@ window.PDTools = (() => {
       try { data = JSON.parse(xhr.responseText); } catch { /* не JSON */ }
       done();
       if (xhr.status !== 200) {
-        toast((data && data.detail) || `Ошибка ${xhr.status}`, true);
+        toast((data && data.detail) || tx("Ошибка {0}", xhr.status), true);
         return;
       }
       results = data.results;
       showResults(data.ttl_min);
     };
-    xhr.onerror = () => { done(); toast("Нет связи с сервером", true); };
+    xhr.onerror = () => { done(); toast(tx("Нет связи с сервером"), true); };
     xhr.send(fd);
   }
 
@@ -359,17 +359,17 @@ window.PDTools = (() => {
           el("div", { class: "tf-name" }, r.name),
           el("div", { class: "tf-size" }, fmtSize(r.size))),
         el("div", { class: "tr-links" },
-          r.viewable ? el("a", { href: r.url, target: "_blank", rel: "noopener" }, "Открыть") : null,
-          el("a", { href: r.download_url, download: r.name }, "Скачать")))));
+          r.viewable ? el("a", { href: r.url, target: "_blank", rel: "noopener" }, tx("Открыть")) : null,
+          el("a", { href: r.download_url, download: r.name }, tx("Скачать"))))));
     $("toolShareAll").hidden = !canShareFiles;
-    $("toolShareAll").textContent = results.length > 1 ? `📤 Поделиться (${results.length})` : "📤 Поделиться";
-    let note = `Файлы хранятся на сервере ${ttl} минут, потом удаляются.`;
+    $("toolShareAll").textContent = results.length > 1 ? tx("📤 Поделиться ({0})", results.length) : tx("📤 Поделиться");
+    let note = tx("Файлы хранятся на сервере {0} минут, потом удаляются.", ttl);
     if (tool.op === "compress-pdf" && items[0] && results[0]) {
       const before = items[0].file.size;
       const after = results[0].size;
       note = (after < before
-        ? `Было ${fmtSize(before)} → стало ${fmtSize(after)} (−${Math.round((1 - after / before) * 100)}%). `
-        : "Меньше не получилось — этот PDF уже сжат. ") + note;
+        ? tx("Было {0} → стало {1} (−{2}%). ", fmtSize(before), fmtSize(after), Math.round((1 - after / before) * 100))
+        : tx("Меньше не получилось — этот PDF уже сжат. ")) + note;
     }
     $("toolNote").textContent = note;
     $("toolResults").hidden = false;
@@ -382,10 +382,10 @@ window.PDTools = (() => {
       const close = (value) => { backdrop.remove(); resolve(value); };
       const backdrop = el("div", { class: "sheet-backdrop", onclick: (e) => e.target === backdrop && close(null) },
         el("div", { class: "sheet" },
-          el("h3", {}, "На какой компьютер?"),
+          el("h3", {}, tx("На какой компьютер?")),
           ...chats.map((c) => el("button", { type: "button", onclick: () => close(c) },
-            el("span", {}, c.label), c.pc_online ? el("span", { class: "sheet-online" }, "в сети") : null)),
-          el("button", { type: "button", class: "cancel", onclick: () => close(null) }, "Отмена")));
+            el("span", {}, c.label), c.pc_online ? el("span", { class: "sheet-online" }, tx("в сети")) : null)),
+          el("button", { type: "button", class: "cancel", onclick: () => close(null) }, tx("Отмена"))));
       document.body.append(backdrop);
     });
   }
@@ -397,7 +397,7 @@ window.PDTools = (() => {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ids: results.map((r) => r.id) }),
         });
-        toast("Отправлено на телефон");
+        toast(tx("Отправлено на телефон"));
       } catch (e) {
         toast(e.message, true);
       }
@@ -409,7 +409,7 @@ window.PDTools = (() => {
     } catch (e) {
       return toast(e.message, true);
     }
-    if (!chats.length) return toast("Нет подключённых компьютеров — подключи по QR-коду", true);
+    if (!chats.length) return toast(tx("Нет подключённых компьютеров — подключи по QR-коду"), true);
     const target = chats.length === 1 ? chats[0] : await chooseChat(chats);
     if (!target) return;
     try {
@@ -417,7 +417,7 @@ window.PDTools = (() => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: results.map((r) => r.id), chat_id: target.id }),
       });
-      toast(`Отправлено на «${target.label}»`);
+      toast(tx("Отправлено на «{0}»", target.label));
     } catch (e) {
       toast(e.message, true);
     }

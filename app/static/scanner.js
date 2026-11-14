@@ -8,15 +8,15 @@ window.PDScanner = (() => {
   const ROLE = document.body.dataset.role || "phone";  // «pc» — на компьютере
   const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 
-  const MODES = [["color", "Цвет"], ["doc", "Документ"], ["bw", "Ч/Б"], ["original", "Оригинал"]];
+  const MODES = [["color", tx("Цвет")], ["doc", tx("Документ")], ["bw", tx("Ч/Б")], ["original", tx("Оригинал")]];
   const MODE_NAME = Object.fromEntries(MODES);
-  const WEIGHTS = [["light", "Маленький"], ["normal", "Средний"], ["max", "Высокое качество"]];
+  const WEIGHTS = [["light", tx("Маленький")], ["normal", tx("Средний")], ["max", tx("Высокое качество")]];
   const WEIGHT_HINT = {
-    light: "≈ 150 КБ на страницу — для WhatsApp и почты",
-    normal: "≈ 300–450 КБ на страницу",
-    max: "≈ 1 МБ на страницу — для печати",
+    light: tx("≈ 150 КБ на страницу — для WhatsApp и почты"),
+    normal: tx("≈ 300–450 КБ на страницу"),
+    max: tx("≈ 1 МБ на страницу — для печати"),
   };
-  const PAGE_SIZES = [["a4", "A4"], ["a5", "A5"], ["letter", "Letter"], ["auto", "По размеру фото"]];
+  const PAGE_SIZES = [["a4", "A4"], ["a5", "A5"], ["letter", "Letter"], ["auto", tx("По размеру фото")]];
   const DEFAULTS = { mode: "doc", contrast: 2, sharpness: 1, page_size: "a4", weight: "normal" };
 
   // Настройки запоминаются на этом телефоне (если браузер разрешает).
@@ -42,7 +42,7 @@ window.PDScanner = (() => {
         el("div", { class: "sheet" }, el("h3", {}, title),
           ...options.map(([value, label]) => el("button", { type: "button", onclick: () => close(value) },
             el("span", {}, label), value === current ? el("span", { class: "sheet-online" }, "✓") : null)),
-          el("button", { type: "button", class: "cancel", onclick: () => close(null) }, "Отмена")));
+          el("button", { type: "button", class: "cancel", onclick: () => close(null) }, tx("Отмена"))));
       document.body.append(backdrop);
     });
   }
@@ -50,27 +50,27 @@ window.PDScanner = (() => {
   // ---------- настройки на главном экране сканера: только самое нужное
   function renderSettings(box, onChange, onOpenLook) {
     const lookText = settings.mode === "original" ? MODE_NAME.original
-      : `${MODE_NAME[settings.mode]} · контраст ${settings.contrast} · резкость ${settings.sharpness}`;
+      : tx("{0} · контраст {1} · резкость {2}", MODE_NAME[settings.mode], settings.contrast, settings.sharpness);
     const sizeName = PAGE_SIZES.find(([v]) => v === settings.page_size)?.[1] || "A4";
     box.replaceChildren(
-      el("h4", {}, "Размер PDF"),
+      el("h4", {}, tx("Размер PDF")),
       el("div", { class: "seg seg-weight" }, ...WEIGHTS.map(([value, label]) =>
         el("button", { type: "button", class: settings.weight === value ? "on" : "", onclick: () => {
           settings.weight = value; save(); renderSettings(box, onChange, onOpenLook); onChange("weight");
         } }, label))),
-      el("p", { class: "set-hint" }, settings.mode === "bw" ? "Ч/Б — всегда крошечный файл, десятки КБ на страницу"
+      el("p", { class: "set-hint" }, settings.mode === "bw" ? tx("Ч/Б — всегда крошечный файл, десятки КБ на страницу")
         : WEIGHT_HINT[settings.weight]),
       el("button", { type: "button", class: "set-row", onclick: onOpenLook },
         el("span", { class: "set-ico" }, "🎨"),
-        el("span", { class: "set-text" }, el("b", {}, "Вид страниц"), el("small", {}, lookText)),
+        el("span", { class: "set-text" }, el("b", {}, tx("Вид страниц")), el("small", {}, lookText)),
         el("span", { class: "set-arrow" }, "›")),
       el("button", { type: "button", class: "set-row", onclick: async () => {
-        const value = await choose("Формат листа", PAGE_SIZES, settings.page_size);
+        const value = await choose(tx("Формат листа"), PAGE_SIZES, settings.page_size);
         if (!value) return;
         settings.page_size = value; save(); renderSettings(box, onChange, onOpenLook); onChange("page_size");
       } },
         el("span", { class: "set-ico" }, "📄"),
-        el("span", { class: "set-text" }, el("b", {}, "Формат листа"), el("small", {}, sizeName)),
+        el("span", { class: "set-text" }, el("b", {}, tx("Формат листа")), el("small", {}, sizeName)),
         el("span", { class: "set-arrow" }, "›")));
   }
 
@@ -87,9 +87,9 @@ window.PDScanner = (() => {
         let data = null;
         try { data = JSON.parse(xhr.responseText); } catch { /* не JSON */ }
         if (xhr.status === 200) resolve(data.pages.map((p) => ({ ...p, auto: p.corners, corners: p.corners || FULL, rot: 0 })));
-        else reject(new Error((data && data.detail) || `Ошибка ${xhr.status}`));
+        else reject(new Error((data && data.detail) || tx("Ошибка {0}", xhr.status)));
       };
-      xhr.onerror = () => reject(new Error("Нет связи с сервером"));
+      xhr.onerror = () => reject(new Error(tx("Нет связи с сервером")));
       xhr.send(fd);
     });
   }
@@ -143,7 +143,7 @@ window.PDScanner = (() => {
       $("edResult").src = next.src;
       $("edLoading").hidden = true;
     };
-    next.onerror = () => { if (seq === previewSeq) { $("edLoading").hidden = true; toast("Не удалось обновить превью", true); } };
+    next.onerror = () => { if (seq === previewSeq) { $("edLoading").hidden = true; toast(tx("Не удалось обновить превью"), true); } };
     next.src = previewUrl({ id: current().id, corners, rot }, 1400);
   }
 
@@ -165,9 +165,9 @@ window.PDScanner = (() => {
         el("button", { type: "button", class: settings.mode === value ? "on" : "", onclick: () => {
           settings.mode = value; save(); renderLookTools(); refreshPreview();
         } }, label))),
-      settings.mode === "original" ? null : slider("contrast", settings.mode === "bw" ? "Толщина" : "Контраст"),
-      slider("sharpness", "Резкость"),
-      el("p", { class: "ed-note" }, "Вид применяется ко всем страницам"));
+      settings.mode === "original" ? null : slider("contrast", settings.mode === "bw" ? tx("Толщина") : tx("Контраст")),
+      slider("sharpness", tx("Резкость")),
+      el("p", { class: "ed-note" }, tx("Вид применяется ко всем страницам")));
   }
 
   function showTab(name) {
@@ -187,7 +187,7 @@ window.PDScanner = (() => {
     const box = $("cropBox");
     box.querySelectorAll(".crop-handle").forEach((h) => h.remove());
     corners.forEach((_, i) => {
-      const handle = el("div", { class: "crop-handle", role: "slider", "aria-label": `Уголок ${i + 1}` });
+      const handle = el("div", { class: "crop-handle", role: "slider", "aria-label": tx("Уголок {0}", i + 1) });
       handle.addEventListener("pointerdown", (e) => {
         e.preventDefault();
         handle.setPointerCapture(e.pointerId);

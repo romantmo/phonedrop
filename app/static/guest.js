@@ -21,12 +21,12 @@
   $("codeForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const code = $("codeInput").value.replace(/\D/g, "");
-    if (code.length !== 9) return toast("В коде 9 цифр", true);
+    if (code.length !== 9) return toast(tx("В коде 9 цифр"), true);
     const { status, data } = await call("/api/get/code", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
     });
     if (status === 200 && data.room) location.href = `/room/${data.room}`;
-    else toast((data && data.detail) || `Ошибка ${status}`, true);
+    else toast((data && data.detail) || tx("Ошибка {0}", status), true);
   });
 
   async function loadRooms() {
@@ -35,7 +35,7 @@
     $("roomsList").replaceChildren(...data.rooms.map((r) => el("a", { class: "g-file g-room", href: `/room/${r.id}` },
       el("span", { class: "g-ext g-ava" }, (r.title.trim()[0] || "?").toUpperCase()),
       el("div", { class: "g-info" }, el("b", {}, r.title),
-        el("small", {}, r.last ? (r.last.sender === "guest" ? "Вы: " : "") + r.last.preview : "напиши первым")),
+        el("small", {}, r.last ? (r.last.sender === "guest" ? tx("Вы: ") : "") + r.last.preview : tx("напиши первым"))),
       r.unread ? el("span", { class: "g-badge" }, String(r.unread)) : null)));
     $("roomsCard").hidden = false;
   }

@@ -44,7 +44,10 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.datastructures import Headers, UploadFile
+
+from .i18n import LANG_COOKIE, T, pick_lang, tr
 
 STATIC_DIR = Path(__file__).parent / "static"
 PC_COOKIE = "pd_pc"
@@ -179,7 +182,8 @@ CREATE TABLE IF NOT EXISTS push_subs (
     owner    TEXT NOT NULL,
     p256dh   TEXT NOT NULL,
     auth     TEXT NOT NULL,
-    created  REAL NOT NULL
+    created  REAL NOT NULL,
+    lang     TEXT NOT NULL DEFAULT 'ru'
 );
 CREATE INDEX IF NOT EXISTS push_by_owner ON push_subs(owner);
 CREATE TABLE IF NOT EXISTS tool_results (
@@ -370,6 +374,7 @@ class Store:
         add("accounts", "google_sub", "google_sub TEXT")
         add("accounts", "email", "email TEXT")
         add("devices", "place", "place TEXT NOT NULL DEFAULT ''")  # v1.9: где стоит компьютер — дом / работа
+        add("push_subs", "lang", "lang TEXT NOT NULL DEFAULT 'ru'")  # v2.0: уведомления на языке человека
         # v1.8: «Посылки» и «Попросить файлы» заменены чатами с людьми — убираем их таблицы и файлы.
         for table in ("share_sessions", "share_access", "share_files", "shares"):
             self.db.execute(f"DROP TABLE IF EXISTS {table}")
@@ -468,7 +473,7 @@ class Store:
             account, new_token = self.create_account()
         count = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id=?", account["id"])["n"]
         if count >= MAX_DEVICES:
-            raise HTTPException(409, f"Подключено максимум компьютеров ({MAX_DEVICES}). Отключи ненужные")
+            raise HTTPException(409, T("Подключено максимум компьютеров ({MAX_DEVICES}). Отключи ненужные", MAX_DEVICES=MAX_DEVICES))
         changed = self.run(
             "UPDATE devices SET account_id=?, pair_hash=NULL, pair_expires=0, last_seen=? "
             "WHERE id=? AND account_id IS NULL",
@@ -483,7 +488,7 @@ class Store:
         """Подключить компьютер к аккаунту без QR — после входа через Google на самом компьютере."""
         count = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id=?", account["id"])["n"]
         if count >= MAX_DEVICES:
-            raise HTTPException(409, f"Подключено максимум компьютеров ({MAX_DEVICES}). Отключи ненужные")
+            raise HTTPException(409, T("Подключено максимум компьютеров ({MAX_DEVICES}). Отключи ненужные", MAX_DEVICES=MAX_DEVICES))
         self.run("UPDATE devices SET account_id=?, pair_hash=NULL, pair_expires=0, last_seen=? "
                  "WHERE id=? AND account_id IS NULL", account["id"], time.time(), dev["id"])
         return self.device(dev["id"])
@@ -521,7 +526,7 @@ class Store:
             total = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id IN (?,?)",
                              target["id"], current["id"])["n"]
             if total > MAX_DEVICES:
-                raise HTTPException(409, f"Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные")
+                raise HTTPException(409, T("Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные", MAX_DEVICES=MAX_DEVICES))
             old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
             for table in ("devices", "transfers", "rooms"):
                 self.run(f"UPDATE {table} SET account_id=? WHERE account_id=?", current["id"], target["id"])
@@ -540,7 +545,7 @@ class Store:
             total = self.one("SELECT COUNT(*) AS n FROM devices WHERE account_id IN (?,?)",
                              target["id"], current["id"])["n"]
             if total > MAX_DEVICES:
-                raise HTTPException(409, f"Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные")
+                raise HTTPException(409, T("Вместе получится больше {MAX_DEVICES} компьютеров. Отключи ненужные", MAX_DEVICES=MAX_DEVICES))
         old_subs = self.q("SELECT * FROM push_subs WHERE owner=?", f"acc:{target['id']}")
         self.run("DELETE FROM push_subs WHERE owner=?", f"acc:{target['id']}")  # старый телефон больше не получает
         new_token = secrets.token_urlsafe(32)
@@ -862,7 +867,9 @@ class Store:
     async def _push_one(self, sub: sqlite3.Row, payload: dict) -> None:
         info = {"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}}
         try:
-            await run_in_threadpool(self.push_sender, info, json.dumps(payload, ensure_ascii=False))
+            lang = sub["lang"] if "lang" in sub.keys() else "ru"
+            text = {k: tr(v, lang) for k, v in payload.items()}  # каждому — на его языке
+            await run_in_threadpool(self.push_sender, info, json.dumps(text, ensure_ascii=False))
         except PushGone:
             self.run("DELETE FROM push_subs WHERE endpoint=?", sub["endpoint"])
         except Exception as exc:
@@ -1058,6 +1065,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.limiter = limiter
 
+    def lang_of(request: Request) -> str:
+        return pick_lang(request.cookies.get(LANG_COOKIE), request.headers.get("accept-language"))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def translated_error(request: Request, exc: StarletteHTTPException):
+        """Ошибки уходят человеку на его языке (в коде они по-русски)."""
+        detail = tr(exc.detail, lang_of(request))
+        return JSONResponse({"detail": detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
@@ -1178,7 +1194,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Читает форму с файлами, обрывая загрузку сверх лимита."""
         limit_mb = limit_mb or settings.max_upload_mb
         limit = limit_mb * MB
-        too_big = HTTPException(413, f"Слишком большой размер. Лимит {limit_mb} МБ за раз")
+        too_big = HTTPException(413, T("Слишком большой размер. Лимит {limit_mb} МБ за раз", limit_mb=limit_mb))
         length = request.headers.get("content-length")
         if length is not None:
             try:
@@ -1213,7 +1229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not text:
                 continue
             if len(text) > MAX_TEXT_CHARS:
-                raise HTTPException(413, f"Слишком длинный текст (максимум {MAX_TEXT_CHARS} символов)")
+                raise HTTPException(413, T("Слишком длинный текст (максимум {MAX_TEXT_CHARS} символов)", MAX_TEXT_CHARS=MAX_TEXT_CHARS))
             rows.append((uuid.uuid4().hex, "text", text, None, 0, None, None))
 
         uploads = [(f, "file") for f in files if f.filename]
@@ -1240,7 +1256,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if size is None:
                     dest.unlink(missing_ok=True)
                     raise HTTPException(
-                        413, f"В этом чате закончилось место ({settings.chat_quota_mb} МБ). Удали старые файлы"
+                        413, T("В этом чате закончилось место ({chat_quota_mb} МБ). Удали старые файлы", chat_quota_mb=settings.chat_quota_mb)
                     )
                 used += size
                 saved.append((mid, size))
@@ -1278,7 +1294,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return result
 
     def notify(dev: sqlite3.Row, sender: str, last: sqlite3.Row, count: int) -> None:
-        body = preview(last) if count == 1 else f"{preview(last)} и ещё {count - 1}"
+        body = preview(last) if count == 1 else T("{first} и ещё {more}", first=preview(last), more=count - 1)
         if sender == "phone":
             store.push(f"dev:{dev['id']}", {"title": "📱 Телефон", "body": body, "url": "/", "tag": dev["id"]})
         else:
@@ -1387,19 +1403,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             owners.add(f"acc:{acc['id']}")
         return owners
 
-    def result_names(op: str, inputs: list[tuple[Path, str, str]], count: int, title: str | None) -> list[tuple[str, str]]:
+    def result_names(op: str, inputs: list[tuple[Path, str, str]], count: int, title: str | None,
+                     lang: str = "ru") -> list[tuple[str, str]]:
         first = stem(inputs[0][1]) if inputs else "file"
         if op == "office-pdf":
             return [(f"{first}.pdf", "application/pdf")]
         if op == "images-pdf":
-            name = safe_filename(title) if title else "Скан"
+            name = safe_filename(title) if title else tr("Скан", lang)
             return [(name if name.lower().endswith(".pdf") else f"{name}.pdf", "application/pdf")]
         if op == "merge-pdf":
-            return [(f"{first} (объединённый).pdf", "application/pdf")]
+            return [(tr(T("{first} (объединённый).pdf", first=first), lang), "application/pdf")]
         if op == "compress-pdf":
-            return [(f"{first} (сжатый).pdf", "application/pdf")]
+            return [(tr(T("{first} (сжатый).pdf", first=first), lang), "application/pdf")]
         if op == "pdf-images":
-            return [(f"{first} — стр. {i + 1}.jpg", "image/jpeg") for i in range(count)]
+            return [(tr(T("{first} — стр. {n}.jpg", first=first, n=i + 1), lang), "image/jpeg") for i in range(count)]
         return [(f"{stem(inputs[i][1]) if i < len(inputs) else first}.jpg", "image/jpeg") for i in range(count)]
 
     def check_tool_inputs(op: str, inputs: list[tuple[Path, str, str]]) -> None:
@@ -1585,9 +1602,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def redirect_uri() -> str:
         return f"{settings.public_url}/auth/google/callback"
 
-    def login_failed(role: str, text: str) -> RedirectResponse:
+    def login_failed(request: Request, role: str, text: str) -> RedirectResponse:
         target = "/chat" if role == "phone" else "/"
-        return RedirectResponse(f"{target}?login_error={quote(text)}", status_code=303)
+        return RedirectResponse(f"{target}?login_error={quote(tr(text, lang_of(request)))}", status_code=303)
 
     @app.get("/auth/google", include_in_schema=False)
     async def google_start(request: Request, role: str = "phone"):
@@ -1614,9 +1631,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         saved = unsign(request.cookies.get(OAUTH_COOKIE))
         role = saved.get("r", "phone") if saved else "phone"
         if error:
-            return login_failed(role, "Вход отменён")
+            return login_failed(request, role, "Вход отменён")
         if not saved or not state or not hmac.compare_digest(saved.get("s", ""), state) or time.time() - saved.get("t", 0) > 600:
-            return login_failed(role, "Вход устарел — попробуй ещё раз")
+            return login_failed(request, role, "Вход устарел — попробуй ещё раз")
         try:
             async with httpx.AsyncClient(transport=store.google_transport, timeout=15) as client:
                 r = await client.post(GOOGLE_TOKEN, data={
@@ -1627,7 +1644,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             id_token = r.json().get("id_token", "") if r.status_code == 200 else ""
             claims = json.loads(base64.urlsafe_b64decode(id_token.split(".")[1] + "==="))
         except Exception:
-            return login_failed(role, "Google не ответил — попробуй ещё раз")
+            return login_failed(request, role, "Google не ответил — попробуй ещё раз")
         # Токен пришёл напрямую от Google по HTTPS (OpenID Connect, п. 3.1.3.7) — проверяем поля.
         ok = (claims.get("iss") in ("https://accounts.google.com", "accounts.google.com")
               and claims.get("aud") == settings.google_client_id
@@ -1635,10 +1652,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
               and hmac.compare_digest(str(claims.get("nonce", "")), saved["n"])
               and claims.get("email_verified") is True and claims.get("sub"))
         if not ok:
-            return login_failed(role, "Google вернул неверные данные — попробуй ещё раз")
+            return login_failed(request, role, "Google вернул неверные данные — попробуй ещё раз")
         email = str(claims.get("email", "")).lower()
         if not store.email_allowed(email):
-            return login_failed(role, f"Доступ закрыт: адреса {email} нет в списке разрешённых. Попроси владельца добавить его")
+            return login_failed(request, role, T("Доступ закрыт: адреса {email} нет в списке разрешённых. Попроси владельца добавить его", email=email))
         sub = str(claims["sub"])
         account = store.one("SELECT * FROM accounts WHERE google_sub=?", sub)
         if role == "phone":
@@ -1658,16 +1675,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             dev = store.device_by_token(request.cookies.get(PC_COOKIE))
             if not dev:
-                return login_failed(role, "Обнови страницу и попробуй ещё раз")
+                return login_failed(request, role, "Обнови страницу и попробуй ещё раз")
             if account is None:
                 account, _ = store.create_account(sub, email)  # ключ телефона появится, когда войдёшь на телефоне
             if dev["account_id"] and dev["account_id"] != account["id"]:
-                return login_failed(role, "Этот компьютер уже подключён к другому аккаунту — сначала отключи его")
+                return login_failed(request, role, "Этот компьютер уже подключён к другому аккаунту — сначала отключи его")
             if not dev["account_id"]:
                 try:
                     dev = store.link_pc(dev, account)
                 except HTTPException as exc:
-                    return login_failed(role, exc.detail)
+                    return login_failed(request, role, exc.detail)
                 await store.send_ws(store.phone_sockets.get(account["id"], set()),
                                     {"type": "chats_changed", "chat_id": dev["id"]})
             response = RedirectResponse("/?login=ok", status_code=303)
@@ -1721,7 +1738,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if email in settings.allowed_emails or store.one("SELECT 1 FROM allowed_users WHERE email=?", email):
             raise HTTPException(409, "Этот адрес уже в списке")
         if store.one("SELECT COUNT(*) AS n FROM allowed_users")["n"] >= MAX_USERS:
-            raise HTTPException(400, f"Не больше {MAX_USERS} пользователей")
+            raise HTTPException(400, T("Не больше {MAX_USERS} пользователей", MAX_USERS=MAX_USERS))
         store.run("INSERT INTO allowed_users (email, added_by, created) VALUES (?,?,?)", email, admin["email"], time.time())
         return users_public()
 
@@ -1942,10 +1959,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def check_space(account_id: str, size: int) -> None:
         if size > settings.transfer_max_mb * MB:
-            raise HTTPException(413, f"Слишком большой файл. Максимум {settings.transfer_max_mb // 1024} ГБ")
+            raise HTTPException(413, T("Слишком большой файл. Максимум {n} ГБ", n=settings.transfer_max_mb // 1024))
         if store.account_used_bytes(account_id) + size > settings.transfer_quota_mb * MB:
-            raise HTTPException(507, f"Лимит — {settings.transfer_quota_mb // 1024} ГБ файлов одновременно. "
-                                     "Удали старые передачи или подожди, пока они удалятся сами")
+            raise HTTPException(507, T("Лимит — {n} ГБ файлов одновременно. Удали старые передачи или подожди, пока они удалятся сами", n=settings.transfer_quota_mb // 1024))
         if shutil.disk_usage(store.transfers_root).free - store.reserved_bytes() - size < settings.min_free_disk_mb * MB:
             raise HTTPException(507, "На сервере сейчас не хватает места для такого файла. Попробуй позже")
 
@@ -2028,8 +2044,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row = store.one("SELECT * FROM transfers WHERE id=?", tid)
             await transfers_changed(row)
             store.push(f"dev:{row['to_dev']}", {
-                "title": f"📦 Файл с «{row['from_label']}»",
-                "body": f"{row['name']} · {round(row['size'] / MB, 1)} МБ — скачай в течение {settings.transfer_ttl_hours} ч",
+                "title": T("📦 Файл с «{from_label}»", from_label=row['from_label']),
+                "body": T("{name} · {n} МБ — скачай в течение {transfer_ttl_hours} ч", name=row['name'], n=round(row['size'] / MB, 1), transfer_ttl_hours=settings.transfer_ttl_hours),
                 "url": "/", "tag": f"transfer-{tid}",
             })
         return {"received": received, "done": bool(done)}
@@ -2179,7 +2195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await room_presence(room["id"])
         await store.to_account(room["account_id"], {"type": "rooms_changed"})
         await store.to_room(room["id"], {"type": "joined", "chat_id": room["id"]}, side="owner")
-        push_room_owner(room, {"title": f"✅ {room['title']} вошёл в чат", "body": "Можно переписываться",
+        push_room_owner(room, {"title": T("✅ {title} вошёл в чат", title=room['title']), "body": "Можно переписываться",
                                "url": f"/room/{room['id']}", "tag": f"room-{room['id']}"})
         response = JSONResponse({"room": room["id"]})
         response.set_cookie(ROOM_COOKIE, key, max_age=PHONE_COOKIE_DAYS * DAY, httponly=True,
@@ -2216,7 +2232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not isinstance(body, dict):
             raise HTTPException(400, "Неверный запрос")
         if store.one("SELECT COUNT(*) AS n FROM rooms WHERE account_id=?", account_id)["n"] >= MAX_ROOMS:
-            raise HTTPException(400, f"Не больше {MAX_ROOMS} чатов. Закрой старые")
+            raise HTTPException(400, T("Не больше {MAX_ROOMS} чатов. Закрой старые", MAX_ROOMS=MAX_ROOMS))
         rid = uuid.uuid4().hex
         now = time.time()
         store.run("INSERT INTO rooms (id, account_id, title, owner_name, created, last_activity) VALUES (?,?,?,?,?,?)",
@@ -2291,7 +2307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await room_presence(rid)
         await store.to_room(rid, {"type": "left", "chat_id": rid}, side="owner")
         await store.to_account(room["account_id"], {"type": "rooms_changed"})
-        push_room_owner(room, {"title": f"🚪 {room['title']} вышел из чата",
+        push_room_owner(room, {"title": T("🚪 {title} вышел из чата", title=room['title']),
                                "body": "Чтобы продолжить, отправь ему новый код", "url": f"/room/{rid}",
                                "tag": f"room-{rid}"})
         return {"ok": True}
@@ -2306,7 +2322,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not text:
             raise HTTPException(400, "Пустое сообщение")
         if len(text) > MAX_TEXT_CHARS:
-            raise HTTPException(413, f"Слишком длинный текст (максимум {MAX_TEXT_CHARS} символов)")
+            raise HTTPException(413, T("Слишком длинный текст (максимум {MAX_TEXT_CHARS} символов)", MAX_TEXT_CHARS=MAX_TEXT_CHARS))
         mid, now = uuid.uuid4().hex, time.time()
         store.run("INSERT INTO room_messages (id, room_id, sender, kind, created, text, done) VALUES (?,?,?,?,?,?,?)",
                   mid, rid, side, "text", now, text, now)
@@ -2431,7 +2447,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not room or not room_side(room, request.cookies):
             raise HTTPException(404, "Файл не найден")
         if row["expired"]:
-            raise HTTPException(410, f"Файл удалён: файлы в чате хранятся {settings.transfer_ttl_hours} ч")
+            raise HTTPException(410, T("Файл удалён: файлы в чате хранятся {transfer_ttl_hours} ч", transfer_ttl_hours=settings.transfer_ttl_hours))
         return row
 
     @app.get("/r/{mid}")
@@ -2457,7 +2473,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if convert_to(row["name"], row["mime"]) != "pdf":
             return PlainTextResponse("Этот файл нельзя показать как PDF", 404)
         if row["size"] > settings.tool_max_mb * MB:
-            return PlainTextResponse(f"Файл больше {settings.tool_max_mb} МБ — его можно только скачать", 413)
+            return PlainTextResponse(T("Файл больше {tool_max_mb} МБ — его можно только скачать", tool_max_mb=settings.tool_max_mb), 413)
         cached = store.room_preview_path(mid)
         async with store.preview_locks[mid]:
             if not cached.exists():
@@ -2467,7 +2483,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     (out,) = await run_converter("office-pdf", [(store.room_path(mid), row["name"], row["mime"])], {}, work)
                     out.replace(cached)
                 except HTTPException as exc:
-                    return PlainTextResponse(f"Не получилось показать документ: {exc.detail}", exc.status_code)
+                    return PlainTextResponse(T("Не получилось показать документ: {detail}", detail=exc.detail), exc.status_code)
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
         store.preview_locks.pop(mid, None)
@@ -2538,7 +2554,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not allowed:
             raise HTTPException(404, "Файл не найден")
         if row["expired"]:
-            raise HTTPException(410, f"Файл удалён: он хранился {settings.file_ttl_days} дней")
+            raise HTTPException(410, T("Файл удалён: он хранился {file_ttl_days} дней", file_ttl_days=settings.file_ttl_days))
         mime = row["mime"] or "application/octet-stream"
         inline_ok = viewable(mime) and not dl
         if not viewable(mime):
@@ -2564,7 +2580,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not allowed or convert_to(row["name"], row["mime"]) != "pdf":
             return PlainTextResponse("Файл не найден", 404)
         if row["expired"]:
-            return PlainTextResponse(f"Файл удалён: он хранился {settings.file_ttl_days} дней", 410)
+            return PlainTextResponse(T("Файл удалён: он хранился {file_ttl_days} дней", file_ttl_days=settings.file_ttl_days), 410)
         cached = store.preview_path(dev["id"], row["id"])
         async with store.preview_locks[mid]:  # два одновременных открытия — одна конвертация
             if not cached.exists():
@@ -2575,7 +2591,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "office-pdf", [(store.file_path(dev["id"], row["id"]), row["name"], row["mime"])], {}, work)
                     out.replace(cached)
                 except HTTPException as exc:
-                    return PlainTextResponse(f"Не получилось показать документ: {exc.detail}", exc.status_code)
+                    return PlainTextResponse(T("Не получилось показать документ: {detail}", detail=exc.detail), exc.status_code)
                 finally:
                     shutil.rmtree(work, ignore_errors=True)
         store.preview_locks.pop(mid, None)
@@ -2628,7 +2644,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def scan_page(pid: str, owners: set[str]) -> sqlite3.Row:
         row = store.one("SELECT * FROM scan_pages WHERE id=?", pid)
         if not row or row["owner"] not in owners or not store.scan_path(pid, "orig").exists():
-            raise HTTPException(404, f"Страница не найдена — фото хранятся {settings.tool_ttl_min} минут")
+            raise HTTPException(404, T("Страница не найдена — фото хранятся {tool_ttl_min} минут", tool_ttl_min=settings.tool_ttl_min))
         store.run("UPDATE scan_pages SET created=? WHERE id=?", time.time(), pid)  # продлеваем, пока работаем
         return row
 
@@ -2650,12 +2666,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     name = safe_filename(up.filename)
                     mime = normalize_mime(up.content_type) or mimetypes.guess_type(name)[0] or ""
                     if not is_image(name, mime):
-                        raise HTTPException(400, f"«{name}» — не фото")
+                        raise HTTPException(400, T("«{name}» — не фото", name=name))
                     pid = uuid.uuid4().hex
                     orig = store.scan_path(pid, "orig")
                     if await run_in_threadpool(copy_limited, up.file, orig, settings.tool_max_mb * MB) is None:
                         orig.unlink(missing_ok=True)
-                        raise HTTPException(413, f"Слишком большое фото. Лимит {settings.tool_max_mb} МБ")
+                        raise HTTPException(413, T("Слишком большое фото. Лимит {tool_max_mb} МБ", tool_max_mb=settings.tool_max_mb))
                     try:
                         info = (await converter_post("/scan/prepare", [(orig, name, mime)], {})).json()
                         store.scan_path(pid, "work").write_bytes(base64.b64decode(info["work"]))
@@ -2714,7 +2730,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             params.append({**common, "corners": page.get("corners"), "rot": page.get("rot", 0)})
         page_size = body.get("page_size") if body.get("page_size") in ("auto", "a4", "a5", "letter") else "auto"
         weight = body.get("weight") if body.get("weight") in ("light", "normal", "max") else "normal"
-        title = safe_filename(body.get("name")) if isinstance(body.get("name"), str) else "Скан"
+        title = safe_filename(body.get("name")) if isinstance(body.get("name"), str) else tr("Скан", lang_of(request))
         name = title if title.lower().endswith(".pdf") else f"{title}.pdf"
         work = store.tmp_root / uuid.uuid4().hex
         try:
@@ -2739,7 +2755,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for rid in ids:
             row = store.one("SELECT * FROM tool_results WHERE id=? AND owner=?", rid, owner) if isinstance(rid, str) else None
             if not row or not store.tool_path(rid).exists():
-                raise HTTPException(404, f"Файл не найден — результаты хранятся {settings.tool_ttl_min} минут")
+                raise HTTPException(404, T("Файл не найден — результаты хранятся {tool_ttl_min} минут", tool_ttl_min=settings.tool_ttl_min))
             rows.append(row)
         uploads = uploads_from_paths([(store.tool_path(r["id"]), r["name"], r["mime"]) for r in rows])
         try:
@@ -2765,7 +2781,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for i, up in enumerate(v for v in form.getlist("files") if isinstance(v, UploadFile)):
                     dest = work / "in" / f"{i:03d}"
                     if await run_in_threadpool(copy_limited, up.file, dest, settings.tool_max_mb * MB) is None:
-                        raise HTTPException(413, f"Слишком большой размер. Лимит {settings.tool_max_mb} МБ за раз")
+                        raise HTTPException(413, T("Слишком большой размер. Лимит {tool_max_mb} МБ за раз", tool_max_mb=settings.tool_max_mb))
                     mime = normalize_mime(up.content_type) or mimetypes.guess_type(up.filename or "")[0] or ""
                     inputs.append((dest, safe_filename(up.filename), mime))
                 options = {k: form.get(k) for k in ("mode", "rotations", "preset") if isinstance(form.get(k), str)}
@@ -2774,7 +2790,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await form.close()
             check_tool_inputs(op, inputs)
             outs = await run_converter(op, inputs, options, work / "out")
-            results = save_results(owner, outs, result_names(op, inputs, len(outs), title))
+            results = save_results(owner, outs, result_names(op, inputs, len(outs), title, lang_of(request)))
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return {"results": results, "ttl_min": settings.tool_ttl_min}
@@ -2783,7 +2799,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def get_tool_result(rid: str, request: Request, dl: int = 0):
         row = store.one("SELECT * FROM tool_results WHERE id=?", rid)
         if not row or row["owner"] not in owner_from_cookies(request) or not store.tool_path(rid).exists():
-            raise HTTPException(404, f"Файл не найден — результаты хранятся {settings.tool_ttl_min} минут")
+            raise HTTPException(404, T("Файл не найден — результаты хранятся {tool_ttl_min} минут", tool_ttl_min=settings.tool_ttl_min))
         headers = {}
         if (policy := file_csp(row["mime"])) is not None:
             headers["Content-Security-Policy"] = policy
@@ -2821,8 +2837,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 and isinstance(p256dh, str) and len(p256dh) < 200 and isinstance(auth, str) and len(auth) < 100):
             raise HTTPException(400, "Неверная подписка")
         store.run("DELETE FROM push_subs WHERE endpoint=?", endpoint)
-        store.run("INSERT INTO push_subs (endpoint, owner, p256dh, auth, created) VALUES (?,?,?,?,?)",
-                  endpoint, owner, p256dh, auth, time.time())
+        store.run("INSERT INTO push_subs (endpoint, owner, p256dh, auth, created, lang) VALUES (?,?,?,?,?,?)",
+                  endpoint, owner, p256dh, auth, time.time(), lang_of(request))
         return {"ok": True}
 
     @app.post("/api/push/unsubscribe")
