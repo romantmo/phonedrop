@@ -100,7 +100,7 @@ services:
           echo "TURN_SECRET не задан в /opt/phonedrop/.env — TURN выключен, звонки только напрямую"
           while true; do sleep 3600; done
         fi
-        exec turnserver -n --log-file=stdout --no-cli --no-tls --no-dtls \
+        exec turnserver -n --log-file=stdout --no-cli --no-tls \
           --listening-port=3478 --min-port=49160 --max-port=49200 \
           --use-auth-secret --static-auth-secret="$$TURN_SECRET" --realm=drop.rbgen.com \
           --fingerprint --no-software-attribute --stale-nonce=600 \
@@ -122,6 +122,8 @@ services:
           --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff \
           --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
         # denied-peer-ip: через TURN нельзя достучаться до внутренних адресов сервера и сетей Docker.
+        # DTLS в новом coturn по умолчанию выключен (включается только опцией --dtls),
+        # опции --no-dtls больше нет — с ней coturn не запускается.
 
 networks:
   convert:
